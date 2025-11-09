@@ -17,11 +17,13 @@ from io import BytesIO
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+from airflow.exceptions import AirflowSkipException
 
 # MLflow
 try:
     import mlflow
     import mlflow.pyfunc
+
     MLFLOW_AVAILABLE = True
 except ImportError:
     MLFLOW_AVAILABLE = False
@@ -66,20 +68,19 @@ def load_model_from_mlflow(**context) -> dict:
         model_uri = f"models:/{model_name}/{model_stage}"
         print(f"MLflowからモデルを読み込み: {model_uri}")
 
-        mlflow_model = mlflow.pyfunc.load_model(model_uri)
+        _ = mlflow.pyfunc.load_model(model_uri)
 
         # モデル情報を取得
         client = mlflow.tracking.MlflowClient()
         latest_version = client.get_latest_versions(model_name, stages=[model_stage])[0]
 
         model_info = {
-            "model": mlflow_model,
+            "model_uri": model_uri,
             "model_name": model_name,
             "model_version": latest_version.version,
             "model_stage": model_stage,
             "model_timestamp": latest_version.creation_timestamp,
             "run_id": latest_version.run_id,
-            "model_uri": model_uri,
         }
 
         print(
@@ -96,15 +97,14 @@ def load_model_from_mlflow(**context) -> dict:
             if latest_versions:
                 latest_version = latest_versions[0]
                 model_uri = f"models:/{model_name}/{latest_version.version}"
-                mlflow_model = mlflow.pyfunc.load_model(model_uri)
+                _ = mlflow.pyfunc.load_model(model_uri)
                 model_info = {
-                    "model": mlflow_model,
+                    "model_uri": model_uri,
                     "model_name": model_name,
                     "model_version": latest_version.version,
                     "model_stage": latest_version.current_stage or "None",
                     "model_timestamp": latest_version.creation_timestamp,
                     "run_id": latest_version.run_id,
-                    "model_uri": model_uri,
                 }
                 print(
                     f"フォールバック: モデル読み込み完了: {model_name} v{latest_version.version}"
@@ -116,12 +116,103 @@ def load_model_from_mlflow(**context) -> dict:
             )
 
 
+def _ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
+    candidates = ["timestamp", "datetime", "date", "time", "ts"]
+    for col in df.columns:
+        if col.lower() in candidates:
+            df = df.copy()
+            df["timestamp"] = pd.to_datetime(df[col], utc=True)
+            return df
+    raise KeyError("timestamp")
+
+
+def _to_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return pytz.UTC.localize(dt)
+    return dt.astimezone(pytz.UTC)
+
+
+def _load_hourly_data(
+    s3_hook: S3Hook,
+    bucket_name: str,
+    start_time_utc: datetime,
+    end_time_utc: datetime,
+) -> list[pd.DataFrame]:
+    dataframes: list[pd.DataFrame] = []
+
+    current_time = start_time_utc
+    while current_time < end_time_utc:
+        current_jst = current_time.astimezone(JST)
+        year = current_jst.strftime("%Y")
+        month = current_jst.strftime("%m")
+        day = current_jst.strftime("%d")
+        hour = current_jst.strftime("%H")
+
+        prefix = f"btc-prices/hourly/year={year}/month={month}/day={day}/hour={hour}/"
+        files = s3_hook.list_keys(bucket_name=bucket_name, prefix=prefix) or []
+
+        for file_key in files:
+            if not file_key.endswith(".parquet"):
+                continue
+            try:
+                file_obj = s3_hook.get_key(key=file_key, bucket_name=bucket_name)
+                parquet_data = file_obj.get()["Body"].read()
+                df = pd.read_parquet(BytesIO(parquet_data))
+                df = _ensure_timestamp_column(df)
+                mask = (df["timestamp"] >= start_time_utc) & (
+                    df["timestamp"] <= end_time_utc
+                )
+                df = df[mask]
+                if not df.empty:
+                    dataframes.append(df)
+                    print(f"  読み込み: {file_key} ({len(df)} レコード)")
+            except Exception as e:
+                print(f"  時間データ読み込みエラー ({file_key}): {e}")
+                continue
+
+        current_time += timedelta(hours=1)
+
+    return dataframes
+
+
+def _load_historical_data(
+    s3_hook: S3Hook,
+    bucket_name: str,
+    start_time_utc: datetime,
+    end_time_utc: datetime,
+) -> list[pd.DataFrame]:
+    dataframes: list[pd.DataFrame] = []
+
+    try:
+        prefix = "btc-prices/historical/"
+        files = s3_hook.list_keys(bucket_name=bucket_name, prefix=prefix) or []
+        for file_key in files:
+            if not file_key.endswith(".parquet"):
+                continue
+            try:
+                file_obj = s3_hook.get_key(key=file_key, bucket_name=bucket_name)
+                parquet_data = file_obj.get()["Body"].read()
+                df = pd.read_parquet(BytesIO(parquet_data))
+                df = _ensure_timestamp_column(df)
+                mask = (df["timestamp"] >= start_time_utc) & (
+                    df["timestamp"] <= end_time_utc
+                )
+                df = df[mask]
+                if not df.empty:
+                    dataframes.append(df)
+                    print(f"  読み込み: {file_key} ({len(df)} レコード)")
+            except Exception as e:
+                print(f"  過去データ読み込みエラー ({file_key}): {e}")
+                continue
+    except Exception as e:
+        print(f"  過去データ一覧取得エラー: {e}")
+
+    return dataframes
+
+
 def load_realtime_data(**context) -> dict:
     """
-    S3から最新のリアルタイムデータを読み込む
-
-    Returns:
-        dict: データフレーム（base64エンコード）を含む辞書
+    S3の時間単位データおよび過去データから最新のデータを読み込む
     """
     bucket_name = os.getenv("S3_BUCKET_NAME")
     if not bucket_name:
@@ -129,87 +220,69 @@ def load_realtime_data(**context) -> dict:
 
     s3_hook = S3Hook(aws_conn_id="aws_default")
 
-    # 最新データを読み込む
-    latest_key = "btc-prices/realtime/latest/btc_latest.parquet"
+    logical_date = context.get("logical_date")
+    if logical_date:
+        end_time = logical_date.in_timezone(JST)
+    else:
+        end_time = datetime.now(JST)
 
-    try:
-        file_obj = s3_hook.get_key(key=latest_key, bucket_name=bucket_name)
-        parquet_data = file_obj.get()["Body"].read()
-        df = pd.read_parquet(BytesIO(parquet_data))
+    start_time = end_time - timedelta(hours=1)
 
-        print(f"最新データを読み込み: {len(df)} レコード")
-        print(
-            f"データタイムスタンプ: {df['timestamp'].iloc[-1] if 'timestamp' in df.columns else 'N/A'}"
+    start_time_utc = _to_utc(start_time)
+    end_time_utc = _to_utc(end_time)
+
+    print(
+        f"リアルタイム予測用データ取得期間: {start_time_utc.isoformat()} 〜 {end_time_utc.isoformat()} (UTC)"
+    )
+
+    dataframes: list[pd.DataFrame] = []
+
+    # 時間単位データを優先的に読み込む
+    dataframes.extend(
+        _load_hourly_data(
+            s3_hook=s3_hook,
+            bucket_name=bucket_name,
+            start_time_utc=start_time_utc,
+            end_time_utc=end_time_utc,
+        )
+    )
+
+    # データが見つからない場合は過去データを使用
+    if not dataframes:
+        print("時間単位データが見つからないため、過去データを検索します...")
+        dataframes.extend(
+            _load_historical_data(
+                s3_hook=s3_hook,
+                bucket_name=bucket_name,
+                start_time_utc=start_time_utc - timedelta(days=1),
+                end_time_utc=end_time_utc,
+            )
         )
 
-        # 過去60分分のデータも取得（特徴量計算用）
-        execution_date = context.get("execution_date")
-        if execution_date:
-            if execution_date.tzinfo is None:
-                end_time = JST.localize(execution_date)
-            else:
-                end_time = execution_date.astimezone(JST)
-        else:
-            end_time = datetime.now(JST)
+    if not dataframes:
+        raise AirflowSkipException("予測に使用可能なデータが見つかりませんでした")
 
-        start_time = end_time - timedelta(minutes=60)
-        date_str = start_time.strftime("%Y-%m-%d")
+    consolidated_df = pd.concat(dataframes, ignore_index=True)
+    consolidated_df = consolidated_df.sort_values("timestamp").drop_duplicates(
+        subset=["timestamp"], keep="last"
+    )
+    consolidated_df = consolidated_df.reset_index(drop=True)
 
-        # バッファデータを読み込む
-        buffer_prefix = f"btc-prices/realtime/buffer/{date_str}/"
-        buffer_files = s3_hook.list_keys(bucket_name=bucket_name, prefix=buffer_prefix)
+    print(f"統合データ: {len(consolidated_df)} レコード")
+    print(
+        f"データ期間: {consolidated_df['timestamp'].min()} 〜 {consolidated_df['timestamp'].max()}"
+    )
 
-        buffer_dataframes = []
-        for file_key in buffer_files:
-            if file_key.endswith(".parquet"):
-                try:
-                    file_obj = s3_hook.get_key(key=file_key, bucket_name=bucket_name)
-                    parquet_data = file_obj.get()["Body"].read()
-                    buffer_df = pd.read_parquet(BytesIO(parquet_data))
+    parquet_buffer = BytesIO()
+    consolidated_df.to_parquet(parquet_buffer, index=False, engine="pyarrow")
+    parquet_data = parquet_buffer.getvalue()
+    parquet_data_base64 = base64.b64encode(parquet_data).decode("utf-8")
 
-                    # タイムスタンプでフィルタリング
-                    if "timestamp" in buffer_df.columns:
-                        buffer_df["timestamp"] = pd.to_datetime(buffer_df["timestamp"])
-                        mask = buffer_df["timestamp"] >= start_time
-                        buffer_df = buffer_df[mask]
-                        if len(buffer_df) > 0:
-                            buffer_dataframes.append(buffer_df)
-                except Exception as e:
-                    print(f"バッファデータ読み込みエラー ({file_key}): {e}")
-                    continue
-
-        # データを統合
-        if buffer_dataframes:
-            all_dataframes = buffer_dataframes + [df]
-            consolidated_df = pd.concat(all_dataframes, ignore_index=True)
-            consolidated_df = consolidated_df.drop_duplicates(
-                subset=["timestamp"], keep="last"
-            )
-            consolidated_df = consolidated_df.sort_values("timestamp").reset_index(
-                drop=True
-            )
-        else:
-            consolidated_df = df
-
-        print(f"統合データ: {len(consolidated_df)} レコード")
-
-        # Parquet形式に変換してbase64エンコード
-        parquet_buffer = BytesIO()
-        consolidated_df.to_parquet(parquet_buffer, index=False, engine="pyarrow")
-        parquet_data = parquet_buffer.getvalue()
-        parquet_data_base64 = base64.b64encode(parquet_data).decode("utf-8")
-
-        return {
-            "parquet_data_base64": parquet_data_base64,
-            "record_count": len(consolidated_df),
-            "latest_timestamp": consolidated_df["timestamp"].iloc[-1].isoformat()
-            if "timestamp" in consolidated_df.columns
-            else None,
-        }
-
-    except Exception as e:
-        print(f"リアルタイムデータ読み込みエラー: {e}")
-        raise
+    return {
+        "parquet_data_base64": parquet_data_base64,
+        "record_count": len(consolidated_df),
+        "latest_timestamp": consolidated_df["timestamp"].iloc[-1].isoformat(),
+    }
 
 
 def create_realtime_features(**context) -> dict:
@@ -273,7 +346,8 @@ def make_realtime_prediction(**context) -> dict:
     df = pd.read_parquet(BytesIO(parquet_data))
 
     # MLflowモデルを取得
-    mlflow_model = model_info["model"]
+    model_uri = model_info["model_uri"]
+    mlflow_model = mlflow.pyfunc.load_model(model_uri)
     model_name = model_info["model_name"]
     model_version = model_info["model_version"]
 
@@ -322,7 +396,9 @@ def make_realtime_prediction(**context) -> dict:
     print(
         f"  誤差: ${result['prediction_error']:,.2f} ({result['prediction_error_pct']:.2f}%)"
     )
-    print(f"  使用モデル: {model_name} v{model_version} ({model_info.get('model_stage')})")
+    print(
+        f"  使用モデル: {model_name} v{model_version} ({model_info.get('model_stage')})"
+    )
 
     return result
 

@@ -45,6 +45,28 @@ default_args = {
 }
 
 
+def _get_column_case_insensitive(df: pd.DataFrame, target: str) -> Optional[str]:
+    target_lower = target.lower()
+    for column in df.columns:
+        if column.lower() == target_lower:
+            return column
+    return None
+
+
+def _ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure the dataframe has a `timestamp` column."""
+    df = df.copy()
+    candidates = ["timestamp", "datetime", "date", "time", "ts"]
+    for candidate in candidates:
+        column = _get_column_case_insensitive(df, candidate)
+        if column:
+            ts = pd.to_datetime(df[column], utc=True, errors="coerce")
+            df["timestamp"] = ts
+            return df
+
+    raise KeyError("timestamp")
+
+
 def load_data_from_s3(**context) -> dict:
     """
     S3からBTC価格データを読み込む
@@ -60,19 +82,21 @@ def load_data_from_s3(**context) -> dict:
     all_dataframes = []
 
     # 実行日を取得
-    execution_date = context.get("execution_date")
-    if execution_date:
-        if execution_date.tzinfo is None:
-            end_date = JST.localize(execution_date)
-        else:
-            end_date = execution_date.astimezone(JST)
+    logical_date = context.get("logical_date")
+    if logical_date:
+        end_date = logical_date.in_timezone(JST)
     else:
         end_date = datetime.now(JST)
 
     # 過去90日分のデータを取得（訓練用）
     start_date = end_date - timedelta(days=90)
 
-    print(f"データ取得期間: {start_date.date()} から {end_date.date()}")
+    start_date_utc = start_date.astimezone(pytz.UTC)
+    end_date_utc = end_date.astimezone(pytz.UTC)
+
+    print(
+        f"データ取得期間: {start_date_utc.date()} から {end_date_utc.date()} (UTC基準)"
+    )
 
     # 1. 過去（historical）データを読み込む
     try:
@@ -87,11 +111,10 @@ def load_data_from_s3(**context) -> dict:
                 parquet_data = file_obj.get()["Body"].read()
                 df = pd.read_parquet(BytesIO(parquet_data))
 
-                if "timestamp" not in df.columns and "date" in df.columns:
-                    df["timestamp"] = pd.to_datetime(df["date"])
-
-                df["timestamp"] = pd.to_datetime(df["timestamp"])
-                mask = (df["timestamp"] >= start_date) & (df["timestamp"] <= end_date)
+                df = _ensure_timestamp_column(df)
+                mask = (df["timestamp"] >= start_date_utc) & (
+                    df["timestamp"] <= end_date_utc
+                )
                 df = df[mask]
 
                 if len(df) > 0:
@@ -122,14 +145,10 @@ def load_data_from_s3(**context) -> dict:
                     parquet_data = file_obj.get()["Body"].read()
                     df = pd.read_parquet(BytesIO(parquet_data))
 
-                    if "timestamp" not in df.columns:
-                        df["timestamp"] = pd.to_datetime(
-                            df.get("timestamp", pd.Timestamp.now())
-                        )
-                    else:
-                        df["timestamp"] = pd.to_datetime(df["timestamp"])
-
-                    mask = (df["timestamp"] >= start_date) & (df["timestamp"] <= end_date)
+                    df = _ensure_timestamp_column(df)
+                    mask = (df["timestamp"] >= start_date_utc) & (
+                        df["timestamp"] <= end_date_utc
+                    )
                     df = df[mask]
 
                     if len(df) > 0:
@@ -149,7 +168,9 @@ def load_data_from_s3(**context) -> dict:
     consolidated_df = pd.concat(all_dataframes, ignore_index=True)
 
     # タイムスタンプでソート
-    consolidated_df["timestamp"] = pd.to_datetime(consolidated_df["timestamp"])
+    consolidated_df["timestamp"] = pd.to_datetime(
+        consolidated_df["timestamp"], utc=True
+    )
     consolidated_df = consolidated_df.sort_values("timestamp").reset_index(drop=True)
 
     # 重複を削除
@@ -253,29 +274,37 @@ def train_models(**context) -> dict:
     # モデルを訓練（MLflow統合）
     use_mlflow = os.getenv("USE_MLFLOW", "true").lower() == "true"
     trainer = ModelTrainer(random_state=42, use_mlflow=use_mlflow)
-    
+
     # MLflow runを開始
     if use_mlflow:
         try:
             import mlflow
+
             mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
             mlflow.set_tracking_uri(mlflow_tracking_uri)
-            experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "btc-price-prediction")
+            experiment_name = os.getenv(
+                "MLFLOW_EXPERIMENT_NAME", "btc-price-prediction"
+            )
             mlflow.set_experiment(experiment_name)
         except Exception as e:
             print(f"MLflow setup error: {e}")
             use_mlflow = False
-    
+
     if use_mlflow:
         import mlflow
-        with mlflow.start_run(run_name=f"training_{datetime.now(JST).strftime('%Y%m%d_%H%M%S')}"):
-            mlflow.log_params({
-                "train_samples": len(X_train),
-                "val_samples": len(X_val),
-                "features": X_train.shape[1]
-            })
+
+        with mlflow.start_run(
+            run_name=f"training_{datetime.now(JST).strftime('%Y%m%d_%H%M%S')}"
+        ):
+            mlflow.log_params(
+                {
+                    "train_samples": len(X_train),
+                    "val_samples": len(X_val),
+                    "features": X_train.shape[1],
+                }
+            )
             results = trainer.train_all_models(X_train, y_train, X_val, y_val)
-            
+
             # 最良のモデルをModel Registryに登録
             try:
                 model_uri = trainer.register_best_model_to_mlflow()
@@ -411,12 +440,9 @@ def save_results_to_s3(**context) -> dict:
     s3_hook = S3Hook(aws_conn_id="aws_default")
 
     # 実行日時を取得
-    execution_date = context.get("execution_date")
-    if execution_date:
-        if execution_date.tzinfo is None:
-            run_date = JST.localize(execution_date)
-        else:
-            run_date = execution_date.astimezone(JST)
+    logical_date = context.get("logical_date")
+    if logical_date:
+        run_date = logical_date.in_timezone(JST)
     else:
         run_date = datetime.now(JST)
 

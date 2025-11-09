@@ -7,6 +7,7 @@ S3から過去1時間分のリアルタイムデータを読み込んで統合�
 import os
 from datetime import datetime, timedelta
 from airflow import DAG
+from airflow.exceptions import AirflowSkipException
 from airflow.operators.python import PythonOperator
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 import pandas as pd
@@ -44,12 +45,9 @@ def get_hourly_data(**context):
         raise ValueError("S3_BUCKET_NAME環境変数が設定されていません")
 
     # 実行時刻から前1時間の範囲を計算
-    execution_date = context.get("execution_date")
-    if execution_date:
-        if execution_date.tzinfo is None:
-            end_time = JST.localize(execution_date)
-        else:
-            end_time = execution_date.astimezone(JST)
+    logical_date = context.get("logical_date")
+    if logical_date:
+        end_time = logical_date.in_timezone(JST)
     else:
         # 手動実行の場合
         end_time = datetime.now(JST)
@@ -136,7 +134,7 @@ def transform_data(**context):
     consolidated_df = get_hourly_data(**context)
 
     if consolidated_df is None:
-        raise ValueError("統合するデータが見つかりませんでした")
+        raise AirflowSkipException("統合するデータが見つかりませんでした")
 
     # Parquet形式に変換
     parquet_buffer = BytesIO()
@@ -149,12 +147,9 @@ def transform_data(**context):
     print(f"データを整形しました。Parquetサイズ: {len(parquet_data)} bytes")
 
     # 実行時刻から前1時間の範囲を計算（S3キー生成用）
-    execution_date = context.get("execution_date")
-    if execution_date:
-        if execution_date.tzinfo is None:
-            end_time = JST.localize(execution_date)
-        else:
-            end_time = execution_date.astimezone(JST)
+    logical_date = context.get("logical_date")
+    if logical_date:
+        end_time = logical_date.in_timezone(JST)
     else:
         end_time = datetime.now(JST)
 
