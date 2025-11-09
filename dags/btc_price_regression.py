@@ -74,44 +74,37 @@ def load_data_from_s3(**context) -> dict:
 
     print(f"データ取得期間: {start_date.date()} から {end_date.date()}")
 
-    # 1. 日次データを読み込む（優先）
+    # 1. 過去（historical）データを読み込む
     try:
-        current_date = start_date
-        while current_date <= end_date:
-            year = current_date.strftime("%Y")
-            month = current_date.strftime("%m")
-            day = current_date.strftime("%d")
-            date_str = current_date.strftime("%Y-%m-%d")
+        prefix = "btc-prices/historical/"
+        files = s3_hook.list_keys(bucket_name=bucket_name, prefix=prefix)
 
-            prefix = f"btc-prices/daily/year={year}/month={month}/day={day}/"
-            files = s3_hook.list_keys(bucket_name=bucket_name, prefix=prefix)
+        for file_key in files:
+            if not file_key.endswith(".parquet"):
+                continue
+            try:
+                file_obj = s3_hook.get_key(key=file_key, bucket_name=bucket_name)
+                parquet_data = file_obj.get()["Body"].read()
+                df = pd.read_parquet(BytesIO(parquet_data))
 
-            for file_key in files:
-                if file_key.endswith(".parquet"):
-                    try:
-                        file_obj = s3_hook.get_key(
-                            key=file_key, bucket_name=bucket_name
-                        )
-                        parquet_data = file_obj.get()["Body"].read()
-                        df = pd.read_parquet(BytesIO(parquet_data))
+                if "timestamp" not in df.columns and "date" in df.columns:
+                    df["timestamp"] = pd.to_datetime(df["date"])
 
-                        # タイムスタンプ列を統一
-                        if "timestamp" not in df.columns and "date" in df.columns:
-                            df["timestamp"] = pd.to_datetime(df["date"])
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                mask = (df["timestamp"] >= start_date) & (df["timestamp"] <= end_date)
+                df = df[mask]
 
-                        all_dataframes.append(df)
-                        print(f"  読み込み: {file_key} ({len(df)} レコード)")
-                    except Exception as e:
-                        print(f"  ファイル処理エラー ({file_key}): {e}")
-                        continue
-
-            current_date += timedelta(days=1)
+                if len(df) > 0:
+                    all_dataframes.append(df)
+                    print(f"  読み込み: {file_key} ({len(df)} レコード)")
+            except Exception as e:
+                print(f"  ファイル処理エラー ({file_key}): {e}")
+                continue
     except Exception as e:
-        print(f"日次データ取得エラー: {e}")
+        print(f"過去データ取得エラー: {e}")
 
-    # 2. 日次データがない場合は、時間単位データから統合
-    if not all_dataframes:
-        print("日次データが見つからないため、時間単位データから統合します...")
+    # 2. 時間単位（hourly）データを読み込む
+    try:
         current_date = start_date
         while current_date <= end_date:
             year = current_date.strftime("%Y")
@@ -122,60 +115,32 @@ def load_data_from_s3(**context) -> dict:
             files = s3_hook.list_keys(bucket_name=bucket_name, prefix=prefix)
 
             for file_key in files:
-                if file_key.endswith(".parquet"):
-                    try:
-                        file_obj = s3_hook.get_key(
-                            key=file_key, bucket_name=bucket_name
+                if not file_key.endswith(".parquet"):
+                    continue
+                try:
+                    file_obj = s3_hook.get_key(key=file_key, bucket_name=bucket_name)
+                    parquet_data = file_obj.get()["Body"].read()
+                    df = pd.read_parquet(BytesIO(parquet_data))
+
+                    if "timestamp" not in df.columns:
+                        df["timestamp"] = pd.to_datetime(
+                            df.get("timestamp", pd.Timestamp.now())
                         )
-                        parquet_data = file_obj.get()["Body"].read()
-                        df = pd.read_parquet(BytesIO(parquet_data))
+                    else:
+                        df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-                        if "timestamp" not in df.columns:
-                            df["timestamp"] = pd.to_datetime(
-                                df.get("timestamp", pd.Timestamp.now())
-                            )
+                    mask = (df["timestamp"] >= start_date) & (df["timestamp"] <= end_date)
+                    df = df[mask]
 
+                    if len(df) > 0:
                         all_dataframes.append(df)
-                    except Exception as e:
-                        print(f"  ファイル処理エラー ({file_key}): {e}")
-                        continue
+                except Exception as e:
+                    print(f"  ファイル処理エラー ({file_key}): {e}")
+                    continue
 
             current_date += timedelta(days=1)
-
-    # 3. それでもデータがない場合は、過去データを読み込む
-    if not all_dataframes:
-        print("時間単位データも見つからないため、過去データを読み込みます...")
-        try:
-            prefix = "btc-prices/historical/"
-            files = s3_hook.list_keys(bucket_name=bucket_name, prefix=prefix)
-
-            for file_key in files:
-                if file_key.endswith(".parquet"):
-                    try:
-                        file_obj = s3_hook.get_key(
-                            key=file_key, bucket_name=bucket_name
-                        )
-                        parquet_data = file_obj.get()["Body"].read()
-                        df = pd.read_parquet(BytesIO(parquet_data))
-
-                        if "timestamp" not in df.columns and "date" in df.columns:
-                            df["timestamp"] = pd.to_datetime(df["date"])
-
-                        # 期間でフィルタリング
-                        df["timestamp"] = pd.to_datetime(df["timestamp"])
-                        mask = (df["timestamp"] >= start_date) & (
-                            df["timestamp"] <= end_date
-                        )
-                        df = df[mask]
-
-                        if len(df) > 0:
-                            all_dataframes.append(df)
-                            print(f"  読み込み: {file_key} ({len(df)} レコード)")
-                    except Exception as e:
-                        print(f"  ファイル処理エラー ({file_key}): {e}")
-                        continue
-        except Exception as e:
-            print(f"過去データ取得エラー: {e}")
+    except Exception as e:
+        print(f"時間単位データ取得エラー: {e}")
 
     if not all_dataframes:
         raise ValueError("S3からデータを取得できませんでした")
