@@ -1,5 +1,5 @@
 # Airflowとそのプロバイダーはベースイメージに既に含まれているため、追加のパッケージのみをインストール
-# Airflow 3.0.2はPython 3.12を使用するため、最新のpandasとpyarrowを使用可能
-pandas==2.2.2
-pyarrow==17.0.0
+# Airflow 2.9.0はPython 3.11を使用するため、互換性のあるバージョンを使用
+pandas==2.1.4
+pyarrow==14.0.2
 

@@ -32,6 +32,8 @@ cp .env.example .env
 - `AWS_DEFAULT_REGION`: AWSリージョン（例: ap-northeast-1）
 - `S3_BUCKET_NAME`: S3バケット名
 - `COINGECKO_API_KEY`: CoinGecko APIキー（オプション、無料プランでも使用可能）
+- `_AIRFLOW_WWW_USER_USERNAME`: Airflow Web UIのユーザー名（デフォルト: `airflow`）
+- `_AIRFLOW_WWW_USER_PASSWORD`: Airflow Web UIのパスワード（デフォルト: `airflow`）
 
 ### 2. Airflowの初期化と起動
 
@@ -50,8 +52,10 @@ docker-compose up -d
 
 ブラウザで以下のURLにアクセス：
 - URL: http://localhost:8080
-- ユーザー名: `airflow`
-- パスワード: `airflow`
+- ユーザー名: `.env`ファイルの`_AIRFLOW_WWW_USER_USERNAME`で設定した値（デフォルト: `airflow`）
+- パスワード: `.env`ファイルの`_AIRFLOW_WWW_USER_PASSWORD`で設定した値（デフォルト: `airflow`）
+
+**注意**: 初回起動時は、ログに自動生成されたパスワードが表示される場合があります。環境変数で設定した値を使用してください。
 
 ### 4. AWS接続の設定
 
@@ -98,17 +102,17 @@ s3://<bucket-name>/btc-prices/<YYYY-MM-DD>/btc_price_<timestamp>.parquet
 
 ## スケジュール変更
 
-DAGの実行頻度を変更する場合は、`dags/coin_gecko_btc_to_s3.py`の`schedule`を編集（Airflow 3.0では`schedule_interval`から`schedule`に変更されました）：
+DAGの実行頻度を変更する場合は、`dags/coin_gecko_btc_to_s3.py`の`schedule_interval`を編集：
 
 ```python
 # 毎時間実行
-schedule='@hourly'
+schedule_interval='@hourly'
 
 # 毎週実行
-schedule='@weekly'
+schedule_interval='@weekly'
 
 # Cron形式（例: 毎日午前9時）
-schedule='0 9 * * *'
+schedule_interval='0 9 * * *'
 ```
 
 ## トラブルシューティング

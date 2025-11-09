@@ -3,7 +3,7 @@ CoinGecko APIからBTC価格情報を取得してS3にアップロードするDA
 
 このDAGは以下の処理を実行します:
 1. CoinGecko APIからBTCの価格情報を取得
-2. データを整形（CSV/Parquet形式に変換）
+2. データを整形（Parquet形式に変換）
 3. Amazon S3にアップロード
 """
 
@@ -14,7 +14,8 @@ from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 import requests
 import pandas as pd
 import os
-from io import StringIO, BytesIO
+import base64
+from io import BytesIO
 
 # デフォルト引数
 default_args = {
@@ -31,7 +32,7 @@ dag = DAG(
     "coin_gecko_btc_to_s3",
     default_args=default_args,
     description="CoinGecko APIからBTC価格情報を取得してS3にアップロード",
-    schedule="@daily",  # 毎日実行（必要に応じて変更可能: '@hourly', '@weekly'など）
+    schedule_interval="@daily",  # 毎日実行（必要に応じて変更可能: '@hourly', '@weekly'など）
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=["cryptocurrency", "coingecko", "s3"],
@@ -102,10 +103,10 @@ def fetch_btc_price(**context):
 
 def transform_data(**context):
     """
-    データを整形してCSVとParquet形式に変換
+    データを整形してParquet形式に変換
 
     Returns:
-        tuple: (csv_data, parquet_data) のタプル
+        dict: Parquetデータ（base64エンコード）とタイムスタンプを含む辞書
     """
     # 前のタスクからデータを取得
     ti = context["ti"]
@@ -129,24 +130,19 @@ def transform_data(**context):
     for col in numeric_columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # CSV形式に変換
-    csv_buffer = StringIO()
-    df.to_csv(csv_buffer, index=False)
-    csv_data = csv_buffer.getvalue()
-
     # Parquet形式に変換
     parquet_buffer = BytesIO()
     df.to_parquet(parquet_buffer, index=False, engine="pyarrow")
     parquet_data = parquet_buffer.getvalue()
 
-    print(
-        f"データを整形しました。CSVサイズ: {len(csv_data)} bytes, Parquetサイズ: {len(parquet_data)} bytes"
-    )
+    print(f"データを整形しました。Parquetサイズ: {len(parquet_data)} bytes")
 
-    # XComに保存（バイナリデータはbase64エンコードが必要な場合があるため、BytesIOを返す）
+    # XComに保存（バイナリデータはbase64エンコードが必要）
+    # XComはJSONシリアライゼーションを使用するため、バイナリデータを直接保存できない
+    parquet_data_base64 = base64.b64encode(parquet_data).decode("utf-8")
+    
     return {
-        "csv_data": csv_data,
-        "parquet_data": parquet_data,
+        "parquet_data_base64": parquet_data_base64,
         "timestamp": btc_data["timestamp"],
     }
 
@@ -173,20 +169,12 @@ def upload_to_s3(**context):
     # S3Hookを使用してS3に接続
     s3_hook = S3Hook(aws_conn_id="aws_default")
 
-    # CSVファイルをアップロード
-    csv_key = f"btc-prices/{date_str}/btc_price_{timestamp.replace(':', '-').split('.')[0]}.csv"
-    s3_hook.load_string(
-        string_data=transformed_data["csv_data"],
-        key=csv_key,
-        bucket_name=bucket_name,
-        replace=True,
-    )
-    print(f"CSVファイルをS3にアップロードしました: s3://{bucket_name}/{csv_key}")
-
     # Parquetファイルをアップロード
+    # base64エンコードされたデータをデコード
+    parquet_data = base64.b64decode(transformed_data["parquet_data_base64"])
     parquet_key = f"btc-prices/{date_str}/btc_price_{timestamp.replace(':', '-').split('.')[0]}.parquet"
     s3_hook.load_bytes(
-        bytes_data=transformed_data["parquet_data"],
+        bytes_data=parquet_data,
         key=parquet_key,
         bucket_name=bucket_name,
         replace=True,
@@ -195,7 +183,7 @@ def upload_to_s3(**context):
         f"ParquetファイルをS3にアップロードしました: s3://{bucket_name}/{parquet_key}"
     )
 
-    return {"csv_key": csv_key, "parquet_key": parquet_key, "bucket_name": bucket_name}
+    return {"parquet_key": parquet_key, "bucket_name": bucket_name}
 
 
 # タスク定義
