@@ -17,14 +17,23 @@ x-airflow-common: &airflow-common
     S3_BUCKET_NAME: ${S3_BUCKET_NAME:-}
     # CoinGecko API設定（必要に応じて）
     COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+    # MLflow設定
+    MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+    MLFLOW_EXPERIMENT_NAME: ${MLFLOW_EXPERIMENT_NAME:-btc-price-prediction}
+    MLFLOW_MODEL_NAME: ${MLFLOW_MODEL_NAME:-btc-price-prediction}
+    MLFLOW_MODEL_STAGE: ${MLFLOW_MODEL_STAGE:-Production}
+    USE_MLFLOW: ${USE_MLFLOW:-true}
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
     - ./data:/opt/airflow/data
+    - ./utils:/opt/airflow/utils
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on: &airflow-common-depends-on
     postgres:
+      condition: service_healthy
+    mlflow:
       condition: service_healthy
 
 services:
@@ -36,6 +45,7 @@ services:
       POSTGRES_DB: airflow
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
+      - ./mlflow/init-mlflow-db.sql:/docker-entrypoint-initdb.d/init-mlflow-db.sql
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
       interval: 10s
@@ -156,5 +166,64 @@ services:
     volumes:
       - ${AIRFLOW_PROJ_DIR:-.}:/sources
 
+  mlflow:
+    build:
+      context: ./mlflow
+    image: mlflow-custom:latest
+    container_name: mlflow-server
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=postgresql://airflow:airflow@postgres:5432/mlflow
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=s3://${S3_BUCKET_NAME:-}/mlflow-artifacts/
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-northeast-1}
+    volumes:
+      - mlflow-data:/mlflow
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://airflow:airflow@postgres:5432/mlflow
+      --default-artifact-root s3://${S3_BUCKET_NAME:-}/mlflow-artifacts/
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5000/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 8
+      start_period: 240s
+
+  mlflow-serving:
+    image: mlflow-custom:latest
+    container_name: mlflow-serving
+    ports:
+      - "5001:5000"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MODEL_NAME=btc-price-prediction
+      - MODEL_STAGE=Production
+    command: >
+      mlflow models serve
+      --model-uri models:/btc-price-prediction/Production
+      --host 0.0.0.0
+      --port 5000
+      --no-conda
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5000/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 8
+      start_period: 300s
+
 volumes:
   postgres-db-volume:
+  mlflow-data:
