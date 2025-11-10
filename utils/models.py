@@ -23,8 +23,6 @@ except ImportError:
     print("Warning: mlflow is not available")
 
 try:
-    from sklearn.linear_model import LinearRegression, Ridge
-    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
     from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
     SKLEARN_AVAILABLE = True
@@ -64,153 +62,7 @@ class ModelTrainer:
                 print(f"MLflow experiment設定エラー: {e}")
                 self.use_mlflow = False
 
-    def train_linear_regression(
-        self,
-        X_train: pd.DataFrame,
-        y_train: pd.Series,
-        X_val: Optional[pd.DataFrame] = None,
-        y_val: Optional[pd.Series] = None,
-    ) -> Dict:
-        """線形回帰モデルを訓練"""
-        if not SKLEARN_AVAILABLE:
-            raise ImportError("scikit-learn is required for linear regression")
-
-        model = LinearRegression()
-        model.fit(X_train, y_train)
-
-        train_pred = model.predict(X_train)
-        train_rmse = np.sqrt(mean_squared_error(y_train, train_pred))
-        train_mae = mean_absolute_error(y_train, train_pred)
-        train_r2 = r2_score(y_train, train_pred)
-
-        metrics = {
-            "train_rmse": float(train_rmse),
-            "train_mae": float(train_mae),
-            "train_r2": float(train_r2),
-        }
-
-        if X_val is not None and y_val is not None:
-            val_pred = model.predict(X_val)
-            metrics["val_rmse"] = float(np.sqrt(mean_squared_error(y_val, val_pred)))
-            metrics["val_mae"] = float(mean_absolute_error(y_val, val_pred))
-            metrics["val_r2"] = float(r2_score(y_val, val_pred))
-
-        self.models["linear_regression"] = model
-        self.evaluation_metrics["linear_regression"] = metrics
-
-        # MLflowにログ
-        if self.use_mlflow:
-            try:
-                with mlflow.start_run(run_name="linear_regression", nested=True):
-                    mlflow.log_params({"model_type": "linear_regression"})
-                    mlflow.log_metrics(metrics)
-                    mlflow.sklearn.log_model(model, "model")
-            except Exception as e:
-                print(f"MLflow logging error: {e}")
-
-        return metrics
-
-    def train_ridge_regression(
-        self,
-        X_train: pd.DataFrame,
-        y_train: pd.Series,
-        alpha: float = 1.0,
-        X_val: Optional[pd.DataFrame] = None,
-        y_val: Optional[pd.Series] = None,
-    ) -> Dict:
-        """Ridge回帰モデルを訓練"""
-        if not SKLEARN_AVAILABLE:
-            raise ImportError("scikit-learn is required for ridge regression")
-
-        model = Ridge(alpha=alpha, random_state=self.random_state)
-        model.fit(X_train, y_train)
-
-        train_pred = model.predict(X_train)
-        metrics = {
-            "train_rmse": float(np.sqrt(mean_squared_error(y_train, train_pred))),
-            "train_mae": float(mean_absolute_error(y_train, train_pred)),
-            "train_r2": float(r2_score(y_train, train_pred)),
-        }
-
-        if X_val is not None and y_val is not None:
-            val_pred = model.predict(X_val)
-            metrics["val_rmse"] = float(np.sqrt(mean_squared_error(y_val, val_pred)))
-            metrics["val_mae"] = float(mean_absolute_error(y_val, val_pred))
-            metrics["val_r2"] = float(r2_score(y_val, val_pred))
-
-        self.models["ridge_regression"] = model
-        self.evaluation_metrics["ridge_regression"] = metrics
-
-        # MLflowにログ
-        if self.use_mlflow:
-            try:
-                with mlflow.start_run(run_name="ridge_regression", nested=True):
-                    mlflow.log_params(
-                        {"model_type": "ridge_regression", "alpha": alpha}
-                    )
-                    mlflow.log_metrics(metrics)
-                    mlflow.sklearn.log_model(model, "model")
-            except Exception as e:
-                print(f"MLflow logging error: {e}")
-
-        return metrics
-
-    def train_random_forest(
-        self,
-        X_train: pd.DataFrame,
-        y_train: pd.Series,
-        n_estimators: int = 100,
-        max_depth: Optional[int] = None,
-        X_val: Optional[pd.DataFrame] = None,
-        y_val: Optional[pd.Series] = None,
-    ) -> Dict:
-        """ランダムフォレスト回帰モデルを訓練"""
-        if not SKLEARN_AVAILABLE:
-            raise ImportError("scikit-learn is required for random forest")
-
-        model = RandomForestRegressor(
-            n_estimators=n_estimators,
-            max_depth=max_depth,
-            random_state=self.random_state,
-            n_jobs=-1,
-        )
-        model.fit(X_train, y_train)
-
-        train_pred = model.predict(X_train)
-        metrics = {
-            "train_rmse": float(np.sqrt(mean_squared_error(y_train, train_pred))),
-            "train_mae": float(mean_absolute_error(y_train, train_pred)),
-            "train_r2": float(r2_score(y_train, train_pred)),
-        }
-
-        if X_val is not None and y_val is not None:
-            val_pred = model.predict(X_val)
-            metrics["val_rmse"] = float(np.sqrt(mean_squared_error(y_val, val_pred)))
-            metrics["val_mae"] = float(mean_absolute_error(y_val, val_pred))
-            metrics["val_r2"] = float(r2_score(y_val, val_pred))
-
-        self.models["random_forest"] = model
-        self.evaluation_metrics["random_forest"] = metrics
-
-        # MLflowにログ
-        if self.use_mlflow:
-            try:
-                with mlflow.start_run(run_name="random_forest", nested=True):
-                    mlflow.log_params(
-                        {
-                            "model_type": "random_forest",
-                            "n_estimators": n_estimators,
-                            "max_depth": max_depth or "None",
-                        }
-                    )
-                    mlflow.log_metrics(metrics)
-                    mlflow.sklearn.log_model(model, "model")
-            except Exception as e:
-                print(f"MLflow logging error: {e}")
-
-        return metrics
-
-    def train_xgboost(
+    def train_xgboost_model(
         self,
         X_train: pd.DataFrame,
         y_train: pd.Series,
@@ -220,194 +72,86 @@ class ModelTrainer:
         max_depth: int = 6,
         learning_rate: float = 0.1,
     ) -> Dict:
-        """XGBoost回帰モデルを訓練"""
+        """XGBoostモデルを訓練"""
         if not XGBOOST_AVAILABLE:
-            raise ImportError("xgboost is required for XGBoost regression")
-
-        model = xgb.XGBRegressor(
-            n_estimators=n_estimators,
-            max_depth=max_depth,
-            learning_rate=learning_rate,
-            random_state=self.random_state,
-            n_jobs=-1,
-        )
-
-        if X_val is not None and y_val is not None:
-            model.fit(
-                X_train,
-                y_train,
-                eval_set=[(X_train, y_train), (X_val, y_val)],
-                verbose=False,
-            )
-        else:
-            model.fit(X_train, y_train)
-
-        train_pred = model.predict(X_train)
-        metrics = {
-            "train_rmse": float(np.sqrt(mean_squared_error(y_train, train_pred))),
-            "train_mae": float(mean_absolute_error(y_train, train_pred)),
-            "train_r2": float(r2_score(y_train, train_pred)),
-        }
-
-        if X_val is not None and y_val is not None:
-            val_pred = model.predict(X_val)
-            metrics["val_rmse"] = float(np.sqrt(mean_squared_error(y_val, val_pred)))
-            metrics["val_mae"] = float(mean_absolute_error(y_val, val_pred))
-            metrics["val_r2"] = float(r2_score(y_val, val_pred))
-
-        self.models["xgboost"] = model
-        self.evaluation_metrics["xgboost"] = metrics
-
-        # MLflowにログ
-        if self.use_mlflow:
-            try:
-                with mlflow.start_run(run_name="xgboost", nested=True):
-                    mlflow.log_params(
-                        {
-                            "model_type": "xgboost",
-                            "n_estimators": n_estimators,
-                            "max_depth": max_depth,
-                            "learning_rate": learning_rate,
-                        }
-                    )
-                    mlflow.log_metrics(metrics)
-                    mlflow.xgboost.log_model(model, "model")
-            except Exception as e:
-                print(f"MLflow logging error: {e}")
-
-        return metrics
-
-    def train_gradient_boosting(
-        self,
-        X_train: pd.DataFrame,
-        y_train: pd.Series,
-        X_val: Optional[pd.DataFrame] = None,
-        y_val: Optional[pd.Series] = None,
-        n_estimators: int = 100,
-        max_depth: int = 3,
-        learning_rate: float = 0.1,
-    ) -> Dict:
-        """Gradient Boosting回帰モデルを訓練"""
+            raise ImportError("xgboost is required but not available")
         if not SKLEARN_AVAILABLE:
-            raise ImportError("scikit-learn is required for gradient boosting")
+            raise ImportError("scikit-learn is required for evaluation metrics")
 
-        model = GradientBoostingRegressor(
-            n_estimators=n_estimators,
-            max_depth=max_depth,
-            learning_rate=learning_rate,
-            random_state=self.random_state,
-        )
-        model.fit(X_train, y_train)
-
-        train_pred = model.predict(X_train)
-        metrics = {
-            "train_rmse": float(np.sqrt(mean_squared_error(y_train, train_pred))),
-            "train_mae": float(mean_absolute_error(y_train, train_pred)),
-            "train_r2": float(r2_score(y_train, train_pred)),
-        }
-
-        if X_val is not None and y_val is not None:
-            val_pred = model.predict(X_val)
-            metrics["val_rmse"] = float(np.sqrt(mean_squared_error(y_val, val_pred)))
-            metrics["val_mae"] = float(mean_absolute_error(y_val, val_pred))
-            metrics["val_r2"] = float(r2_score(y_val, val_pred))
-
-        self.models["gradient_boosting"] = model
-        self.evaluation_metrics["gradient_boosting"] = metrics
-
-        # MLflowにログ
-        if self.use_mlflow:
-            try:
-                with mlflow.start_run(run_name="gradient_boosting", nested=True):
-                    mlflow.log_params(
-                        {
-                            "model_type": "gradient_boosting",
-                            "n_estimators": n_estimators,
-                            "max_depth": max_depth,
-                            "learning_rate": learning_rate,
-                        }
-                    )
-                    mlflow.log_metrics(metrics)
-                    mlflow.sklearn.log_model(model, "model")
-            except Exception as e:
-                print(f"MLflow logging error: {e}")
-
-        return metrics
-
-    def train_all_models(
-        self,
-        X_train: pd.DataFrame,
-        y_train: pd.Series,
-        X_val: Optional[pd.DataFrame] = None,
-        y_val: Optional[pd.Series] = None,
-    ) -> Dict:
-        """すべてのモデルを訓練"""
+        print("Training XGBoost...")
         results = {}
-
-        print("Training Linear Regression...")
         try:
-            results["linear_regression"] = self.train_linear_regression(
-                X_train, y_train, X_val, y_val
+            model = xgb.XGBRegressor(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                random_state=self.random_state,
+                n_jobs=-1,
             )
-        except Exception as e:
-            print(f"Error training Linear Regression: {e}")
 
-        print("Training Ridge Regression...")
-        try:
-            results["ridge_regression"] = self.train_ridge_regression(
-                X_train, y_train, X_val, y_val
-            )
-        except Exception as e:
-            print(f"Error training Ridge Regression: {e}")
+            if X_val is not None and y_val is not None:
+                model.fit(
+                    X_train,
+                    y_train,
+                    eval_set=[(X_train, y_train), (X_val, y_val)],
+                    verbose=False,
+                )
+            else:
+                model.fit(X_train, y_train)
 
-        print("Training Random Forest...")
-        try:
-            results["random_forest"] = self.train_random_forest(
-                X_train, y_train, X_val=X_val, y_val=y_val
-            )
-        except Exception as e:
-            print(f"Error training Random Forest: {e}")
+            train_pred = model.predict(X_train)
+            metrics = {
+                "train_rmse": float(np.sqrt(mean_squared_error(y_train, train_pred))),
+                "train_mae": float(mean_absolute_error(y_train, train_pred)),
+                "train_r2": float(r2_score(y_train, train_pred)),
+            }
 
-        if XGBOOST_AVAILABLE:
-            print("Training XGBoost...")
-            try:
-                results["xgboost"] = self.train_xgboost(X_train, y_train, X_val, y_val)
-            except Exception as e:
-                print(f"Error training XGBoost: {e}")
+            if X_val is not None and y_val is not None:
+                val_pred = model.predict(X_val)
+                metrics["val_rmse"] = float(
+                    np.sqrt(mean_squared_error(y_val, val_pred))
+                )
+                metrics["val_mae"] = float(mean_absolute_error(y_val, val_pred))
+                metrics["val_r2"] = float(r2_score(y_val, val_pred))
 
-        print("Training Gradient Boosting...")
-        try:
-            results["gradient_boosting"] = self.train_gradient_boosting(
-                X_train, y_train, X_val, y_val
-            )
+            self.models["xgboost"] = model
+            self.evaluation_metrics["xgboost"] = metrics
+
+            if self.use_mlflow:
+                try:
+                    with mlflow.start_run(run_name="xgboost", nested=True):
+                        mlflow.log_params(
+                            {
+                                "model_type": "xgboost",
+                                "n_estimators": n_estimators,
+                                "max_depth": max_depth,
+                                "learning_rate": learning_rate,
+                            }
+                        )
+                        mlflow.log_metrics(metrics)
+                        mlflow.xgboost.log_model(model, "model")
+                except Exception as e:
+                    print(f"MLflow logging error: {e}")
+
+            results["xgboost"] = metrics
         except Exception as e:
-            print(f"Error training Gradient Boosting: {e}")
+            print(f"Error training XGBoost: {e}")
+            raise
 
         return results
 
-    def get_best_model(
+    def get_trained_model(
         self, metric: str = "val_rmse", lower_is_better: bool = True
     ) -> Tuple[str, object]:
-        """最良のモデルを取得"""
-        if not self.evaluation_metrics:
-            raise ValueError("No models have been trained yet")
+        """訓練済みXGBoostモデルを取得"""
+        if "xgboost" not in self.models:
+            raise ValueError("XGBoost model has not been trained yet")
 
-        best_model_name = None
-        best_score = float("inf") if lower_is_better else float("-inf")
-
-        for model_name, metrics in self.evaluation_metrics.items():
-            if metric in metrics:
-                score = metrics[metric]
-                if (lower_is_better and score < best_score) or (
-                    not lower_is_better and score > best_score
-                ):
-                    best_score = score
-                    best_model_name = model_name
-
-        if best_model_name is None:
+        metrics = self.evaluation_metrics.get("xgboost", {})
+        if metric not in metrics and metrics:
             raise ValueError(f"Metric {metric} not found in evaluation metrics")
 
-        return best_model_name, self.models[best_model_name]
+        return "xgboost", self.models["xgboost"]
 
     def register_best_model_to_mlflow(
         self, metric: str = "val_rmse", model_name: str = "btc-price-prediction"
@@ -418,8 +162,7 @@ class ModelTrainer:
             return None
 
         try:
-            best_model_name, best_model = self.get_best_model(metric=metric)
-            best_metrics = self.evaluation_metrics[best_model_name]
+            best_model_name, best_model = self.get_trained_model(metric=metric)
 
             # 最新のrunを検索
             experiment = mlflow.get_experiment_by_name(self.experiment_name)
