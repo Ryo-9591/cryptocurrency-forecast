@@ -208,6 +208,12 @@ def train_models(**context) -> dict:
         drop_na=False,
     )
 
+    time_columns = {"timestamp", "timestamp_jst", "retrieved_at"}
+    X = X.drop(columns=[col for col in time_columns if col in X.columns], errors="ignore")
+
+    X = X.replace([pd.NA, float("inf"), float("-inf")], pd.NA)
+    y = y.replace([pd.NA, float("inf"), float("-inf")], pd.NA)
+
     valid_mask = ~(X.isna().any(axis=1) | y.isna())
     X = X[valid_mask]
     y = y[valid_mask]
@@ -295,12 +301,17 @@ def train_models(**context) -> dict:
         for model_name in trainer.models.keys():
             all_models_base64[model_name] = trainer.save_model_base64(model_name)
 
+        feature_names = [
+            col
+            for col in X.columns
+            if col not in {"timestamp", "timestamp_jst", "retrieved_at"}
+        ]
         return {
             "best_model_name": best_model_name,
             "best_model_base64": best_model_base64,
             "all_models_base64": all_models_base64,
             "evaluation_metrics": evaluation_summary.to_dict(),
-            "feature_names": list(X.columns),
+            "feature_names": feature_names,
             "forecast_horizon_hours": FORECAST_HORIZON_HOURS,
         }
     except Exception as e:
@@ -308,6 +319,11 @@ def train_models(**context) -> dict:
         # エラーが発生した場合でも、最初のモデルを使用
         if trainer.models:
             first_model_name = list(trainer.models.keys())[0]
+            feature_names = [
+                col
+                for col in X.columns
+                if col not in {"timestamp", "timestamp_jst", "retrieved_at"}
+            ]
             return {
                 "best_model_name": first_model_name,
                 "best_model_base64": trainer.save_model_base64(first_model_name),
@@ -317,7 +333,7 @@ def train_models(**context) -> dict:
                 "evaluation_metrics": evaluation_summary.to_dict()
                 if not evaluation_summary.empty
                 else {},
-                "feature_names": list(X.columns),
+                "feature_names": feature_names,
                 "forecast_horizon_hours": FORECAST_HORIZON_HOURS,
             }
         else:
@@ -363,6 +379,8 @@ def make_predictions(**context) -> dict:
     actual_future_price = y_prepared.loc[latest_index]
 
     feature_names = train_info["feature_names"]
+    time_columns = {"timestamp", "timestamp_jst", "retrieved_at"}
+    feature_names = [col for col in feature_names if col not in time_columns]
     missing_features = set(feature_names) - set(X_latest.columns)
     if missing_features:
         raise ValueError(f"不足している特徴量があります: {missing_features}")
