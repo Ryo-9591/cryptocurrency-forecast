@@ -41,7 +41,7 @@ def _fetch_market_chart_range(
         "from": int(start_time_utc.timestamp()),
         "to": int(end_time_utc.timestamp()),
     }
-    headers = {"accept": "application/json", "x-cg-pro-api-key": api_key}
+    headers = {"accept": "application/json", "x-cg-demo-api-key": api_key}
 
     response = requests.get(
         COINGECKO_API_BASE_URL, params=params, headers=headers, timeout=30
@@ -209,4 +209,3 @@ upload_task = PythonOperator(
 )
 
 fetch_task >> upload_task
-

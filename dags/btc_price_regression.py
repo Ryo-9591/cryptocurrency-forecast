@@ -77,7 +77,7 @@ def _ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
 
 def load_data_from_s3(**context) -> dict:
     """
-    S3からBTC価格データを読み込み、前日分の差分を既存データに追加する
+    S3からBTC価格データ（hourly配下全件）を読み込む
 
     Returns:
         dict: データフレーム（base64エンコード）とメタデータを含む辞書
@@ -87,109 +87,34 @@ def load_data_from_s3(**context) -> dict:
         raise ValueError("S3_BUCKET_NAME環境変数が設定されていません")
 
     s3_hook = S3Hook(aws_conn_id="aws_default")
-    existing_df = pd.DataFrame()
+
+    prefix = "btc-prices/hourly/"
+    print(f"S3から学習データを取得: s3://{bucket_name}/{prefix} 以下の全Parquet")
+
     try:
-        if s3_hook.check_for_key(TRAINING_DATA_S3_KEY, bucket_name=bucket_name):
-            training_obj = s3_hook.get_key(
-                key=TRAINING_DATA_S3_KEY, bucket_name=bucket_name
-            )
-            training_data = training_obj.get()["Body"].read()
-            existing_df = pd.read_parquet(BytesIO(training_data))
-            existing_df = _ensure_timestamp_column(existing_df)
-            print(
-                f"既存訓練データを読み込み: {len(existing_df)} レコード "
-                f"(最終タイムスタンプ: {existing_df['timestamp'].max()})"
-            )
-        else:
-            print("既存訓練データは見つかりませんでした。新規に作成します。")
+        files = s3_hook.list_keys(bucket_name=bucket_name, prefix=prefix) or []
     except Exception as e:
-        print(f"既存訓練データの読み込みに失敗しました（無視）: {e}")
-        existing_df = pd.DataFrame()
+        raise ValueError(f"S3キー一覧の取得に失敗しました: {e}") from e
 
-    logical_date = context.get("logical_date")
-    if logical_date:
-        run_date = logical_date.in_timezone(JST)
-    else:
-        run_date = datetime.now(JST)
+    dataframes: list[pd.DataFrame] = []
 
-    current_day = run_date.date()
-    end_date = JST.localize(datetime.combine(current_day, datetime.min.time()))
-    start_date = end_date - timedelta(days=1)
+    for file_key in files:
+        if not file_key.endswith(".parquet"):
+            continue
+        try:
+            file_obj = s3_hook.get_key(key=file_key, bucket_name=bucket_name)
+            parquet_data = file_obj.get()["Body"].read()
+            df = pd.read_parquet(BytesIO(parquet_data))
+            df = _ensure_timestamp_column(df)
+            dataframes.append(df)
+        except Exception as e:
+            print(f"  ファイル処理エラー ({file_key}): {e}")
+            continue
 
-    start_date_utc = start_date.astimezone(pytz.UTC)
-    end_date_utc = end_date.astimezone(pytz.UTC)
+    if not dataframes:
+        raise ValueError("S3から学習用データを取得できませんでした")
 
-    print(
-        "差分データ取得期間 (UTC): "
-        f"{start_date_utc.isoformat()} 〜 {end_date_utc.isoformat()}"
-    )
-
-    new_dataframes = []
-
-    # 差分対象期間の時間単位（hourly）データのみを読み込む
-    try:
-        current_date = start_date
-        while current_date < end_date:
-            current_jst = current_date.astimezone(JST)
-            year = current_jst.strftime("%Y")
-            month = current_jst.strftime("%m")
-            day = current_jst.strftime("%d")
-
-            prefix = f"btc-prices/hourly/year={year}/month={month}/day={day}/"
-            files = s3_hook.list_keys(bucket_name=bucket_name, prefix=prefix) or []
-
-            for file_key in files:
-                if not file_key.endswith(".parquet"):
-                    continue
-                try:
-                    file_obj = s3_hook.get_key(key=file_key, bucket_name=bucket_name)
-                    parquet_data = file_obj.get()["Body"].read()
-                    df = pd.read_parquet(BytesIO(parquet_data))
-
-                    df = _ensure_timestamp_column(df)
-                    mask = (df["timestamp"] >= start_date_utc) & (
-                        df["timestamp"] < end_date_utc
-                    )
-                    df = df[mask]
-
-                    if len(df) > 0:
-                        new_dataframes.append(df)
-                except Exception as e:
-                    print(f"  差分ファイル処理エラー ({file_key}): {e}")
-                    continue
-
-            current_date += timedelta(days=1)
-    except Exception as e:
-        print(f"差分時間データ取得エラー: {e}")
-
-    if not new_dataframes and existing_df.empty:
-        raise ValueError("S3からデータを取得できませんでした（差分も既存データも空）")
-
-    new_data_df = (
-        pd.concat(new_dataframes, ignore_index=True)
-        if new_dataframes
-        else pd.DataFrame()
-    )
-
-    if not new_data_df.empty:
-        new_data_df["timestamp"] = pd.to_datetime(new_data_df["timestamp"], utc=True)
-        if not existing_df.empty:
-            latest_ts = existing_df["timestamp"].max()
-            new_data_df = new_data_df[new_data_df["timestamp"] > latest_ts]
-        print(f"差分データ数: {len(new_data_df)} レコード")
-    else:
-        print("新しい差分データは見つかりませんでした。既存データのみを使用します。")
-
-    if existing_df.empty:
-        consolidated_df = new_data_df.copy()
-    elif new_data_df.empty:
-        consolidated_df = existing_df.copy()
-    else:
-        consolidated_df = pd.concat([existing_df, new_data_df], ignore_index=True)
-
-    if consolidated_df.empty:
-        raise ValueError("結合後のデータが空です")
-
+    consolidated_df = pd.concat(dataframes, ignore_index=True)
     consolidated_df["timestamp"] = pd.to_datetime(
         consolidated_df["timestamp"], utc=True
     )
@@ -198,12 +123,11 @@ def load_data_from_s3(**context) -> dict:
     )
     consolidated_df = consolidated_df.reset_index(drop=True)
 
-    print(f"統合完了: {len(consolidated_df)} レコード")
+    print(f"読み込み完了: {len(consolidated_df)} レコード")
     print(
         f"データ期間: {consolidated_df['timestamp'].min()} から {consolidated_df['timestamp'].max()}"
     )
 
-    # Parquet形式に変換してbase64エンコード
     parquet_buffer = BytesIO()
     consolidated_df.to_parquet(parquet_buffer, index=False, engine="pyarrow")
     parquet_data = parquet_buffer.getvalue()
@@ -216,7 +140,7 @@ def load_data_from_s3(**context) -> dict:
             "start": consolidated_df["timestamp"].min().isoformat(),
             "end": consolidated_df["timestamp"].max().isoformat(),
         },
-        "new_records": len(new_data_df),
+        "new_records": len(consolidated_df),
     }
 
 
@@ -281,8 +205,12 @@ def train_models(**context) -> dict:
         df,
         target_col="usd_price",
         forecast_horizon=FORECAST_HORIZON_HOURS,
-        drop_na=True,
+        drop_na=False,
     )
+
+    valid_mask = ~(X.isna().any(axis=1) | y.isna())
+    X = X[valid_mask]
+    y = y[valid_mask]
 
     if len(X) == 0 or len(y) == 0:
         raise ValueError("訓練データが準備できませんでした")
