@@ -1,24 +1,28 @@
 """
-時間単位データ取得DAG
-
-S3から過去1時間分のリアルタイムデータを読み込んで統合し、S3に保存
+CoinGeckoからBTCの相場情報を取得し、1時間ごとにS3へ保存するDAG
 """
 
+import base64
 import os
 from datetime import datetime, timedelta
+from io import BytesIO
+from typing import Optional
+
+import pandas as pd
+import pytz
+import requests
 from airflow import DAG
 from airflow.exceptions import AirflowSkipException
 from airflow.operators.python import PythonOperator
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
-import pandas as pd
-from io import BytesIO
-import pytz
-import base64
 
-# タイムゾーン設定（東京時間）
 JST = pytz.timezone("Asia/Tokyo")
+UTC = pytz.UTC
 
-# デフォルト引数
+COINGECKO_API_BASE_URL = (
+    "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart/range"
+)
+
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
@@ -29,175 +33,138 @@ default_args = {
 }
 
 
-def get_hourly_data(**context):
-    """
-    S3から過去1時間分のリアルタイムデータを読み込んで統合
+def _fetch_market_chart_range(
+    start_time_utc: datetime, end_time_utc: datetime, api_key: str
+) -> dict:
+    params = {
+        "vs_currency": "usd",
+        "from": int(start_time_utc.timestamp()),
+        "to": int(end_time_utc.timestamp()),
+    }
+    headers = {"accept": "application/json", "x-cg-pro-api-key": api_key}
 
-    Args:
-        context: Airflowコンテキスト
+    response = requests.get(
+        COINGECKO_API_BASE_URL, params=params, headers=headers, timeout=30
+    )
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        raise ValueError(
+            f"CoinGecko API error: {exc} "
+            f"(status_code={response.status_code}, body={response.text})"
+        ) from exc
 
-    Returns:
-        pd.DataFrame: 統合されたデータフレーム
-    """
-    # S3設定を取得
-    bucket_name = os.getenv("S3_BUCKET_NAME")
-    if not bucket_name:
-        raise ValueError("S3_BUCKET_NAME環境変数が設定されていません")
+    data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError("Unexpected CoinGecko response format")
+    return data
 
-    # 実行時刻から前1時間の範囲を計算
+
+def _series_to_df(series: list, value_column: str) -> Optional[pd.DataFrame]:
+    if not series:
+        return None
+    df = pd.DataFrame(series, columns=["timestamp_ms", value_column])
+    df["timestamp"] = pd.to_datetime(df["timestamp_ms"], unit="ms", utc=True)
+    df = df.drop_duplicates(subset="timestamp")
+    df = df.set_index("timestamp")
+    return df[[value_column]]
+
+
+def fetch_hourly_data(**context) -> dict:
+    api_key = os.getenv("COINGECKO_API_KEY")
+    if not api_key:
+        raise ValueError("COINGECKO_API_KEY環境変数が設定されていません")
+
     logical_date = context.get("logical_date")
     if logical_date:
-        end_time = logical_date.in_timezone(JST)
+        end_time_jst = logical_date.in_timezone(JST)
     else:
-        # 手動実行の場合
-        end_time = datetime.now(JST)
+        end_time_jst = datetime.now(JST)
+    start_time_jst = end_time_jst - timedelta(hours=1)
 
-    # 前1時間の開始時刻と終了時刻
-    start_time = end_time - timedelta(hours=1)
-    start_date_str = start_time.strftime("%Y-%m-%d")
-    end_date_str = end_time.strftime("%Y-%m-%d")
+    start_time_utc = start_time_jst.astimezone(UTC)
+    end_time_utc = end_time_jst.astimezone(UTC)
 
-    print(f"統合対象期間: {start_time} から {end_time}")
+    print(
+        f"CoinGeckoからデータ取得: {start_time_utc.isoformat()} 〜 "
+        f"{end_time_utc.isoformat()} (UTC)"
+    )
 
-    # S3Hookを使用してS3に接続
-    s3_hook = S3Hook(aws_conn_id="aws_default")
+    raw_data = _fetch_market_chart_range(
+        start_time_utc=start_time_utc, end_time_utc=end_time_utc, api_key=api_key
+    )
 
-    # 対象期間のファイルを取得
-    all_dataframes = []
+    price_df = _series_to_df(raw_data.get("prices", []), "usd_price")
+    volume_df = _series_to_df(raw_data.get("total_volumes", []), "usd_24h_vol")
+    market_cap_df = _series_to_df(raw_data.get("market_caps", []), "usd_market_cap")
 
-    # 日付が変わる可能性があるため、両方の日付をチェック
-    dates_to_check = set([start_date_str, end_date_str])
+    if price_df is None:
+        raise AirflowSkipException("CoinGeckoから価格データが取得できませんでした")
 
-    for date_str in dates_to_check:
-        prefix = f"btc-prices/raw/{date_str}/"
-        print(f"S3からファイルを検索中: {prefix}")
+    df = price_df
+    for extra_df in (market_cap_df, volume_df):
+        if extra_df is not None:
+            df = df.join(extra_df, how="outer")
 
-        try:
-            # 該当日のファイル一覧を取得
-            files = s3_hook.list_keys(bucket_name=bucket_name, prefix=prefix)
+    df = df.reset_index().rename(columns={"index": "timestamp"})
+    df = df.sort_values("timestamp")
 
-            for file_key in files:
-                if not file_key.endswith(".parquet"):
-                    continue
+    mask = (df["timestamp"] >= start_time_utc) & (df["timestamp"] <= end_time_utc)
+    df = df[mask]
 
-                # ファイル名からタイムスタンプを抽出
-                try:
-                    filename = file_key.split("/")[-1]
-                    timestamp_str = filename.replace("btc_price_", "").replace(
-                        ".parquet", ""
-                    )
-                    file_timestamp = datetime.strptime(
-                        timestamp_str, "%Y-%m-%dT%H-%M-%S"
-                    )
-                    file_timestamp = JST.localize(file_timestamp)
+    if df.empty:
+        raise AirflowSkipException("指定期間内のデータが存在しませんでした")
 
-                    # 対象期間内かチェック
-                    if start_time <= file_timestamp < end_time:
-                        # ファイルを読み込む
-                        file_obj = s3_hook.get_key(
-                            key=file_key, bucket_name=bucket_name
-                        )
-                        parquet_data = file_obj.get()["Body"].read()
+    df["timestamp_jst"] = df["timestamp"].dt.tz_convert(JST)
+    df["retrieved_at"] = datetime.now(UTC)
 
-                        df = pd.read_parquet(BytesIO(parquet_data))
-                        all_dataframes.append(df)
-                        print(f"  読み込み: {file_key}")
-                except Exception as e:
-                    print(f"  ファイル処理エラー ({file_key}): {e}")
-                    continue
-
-        except Exception as e:
-            print(f"日付 {date_str} のファイル取得エラー: {e}")
-            continue
-
-    if not all_dataframes:
-        print("統合するデータが見つかりませんでした")
-        return None
-
-    # データを統合
-    consolidated_df = pd.concat(all_dataframes, ignore_index=True)
-
-    # タイムスタンプでソート
-    consolidated_df["timestamp"] = pd.to_datetime(consolidated_df["timestamp"])
-    consolidated_df = consolidated_df.sort_values("timestamp").reset_index(drop=True)
-
-    print(f"統合完了: {len(consolidated_df)} レコード")
-
-    return consolidated_df
-
-
-def transform_data(**context):
-    """
-    時間単位データをParquet形式に変換
-    """
-    # データを取得
-    consolidated_df = get_hourly_data(**context)
-
-    if consolidated_df is None:
-        raise AirflowSkipException("統合するデータが見つかりませんでした")
-
-    # Parquet形式に変換
     parquet_buffer = BytesIO()
-    consolidated_df.to_parquet(parquet_buffer, index=False, engine="pyarrow")
+    df.to_parquet(parquet_buffer, index=False, engine="pyarrow")
     parquet_data = parquet_buffer.getvalue()
-
-    # XComに保存するためにbase64エンコード
     parquet_data_base64 = base64.b64encode(parquet_data).decode("utf-8")
 
-    print(f"データを整形しました。Parquetサイズ: {len(parquet_data)} bytes")
-
-    # 実行時刻から前1時間の範囲を計算（S3キー生成用）
-    logical_date = context.get("logical_date")
-    if logical_date:
-        end_time = logical_date.in_timezone(JST)
-    else:
-        end_time = datetime.now(JST)
-
-    start_time = end_time - timedelta(hours=1)
+    print(f"取得データ: {len(df)} レコード, Parquetサイズ: {len(parquet_data)} bytes")
 
     return {
         "parquet_data_base64": parquet_data_base64,
-        "start_time": start_time.isoformat(),
-        "end_time": end_time.isoformat(),
+        "record_count": len(df),
+        "start_time_utc": start_time_utc.isoformat(),
+        "end_time_utc": end_time_utc.isoformat(),
     }
 
 
-def upload_to_s3(**context):
-    """
-    時間単位データをS3にアップロード
-    """
+def upload_to_s3(**context) -> dict:
     ti = context["ti"]
-    transformed_data = ti.xcom_pull(task_ids="transform_data")
+    fetched_data = ti.xcom_pull(task_ids="fetch_hourly_data")
 
-    if not transformed_data:
-        raise ValueError("変換済みデータが取得できませんでした")
+    if not fetched_data:
+        raise ValueError("取得データがXComから取得できませんでした")
 
     bucket_name = os.getenv("S3_BUCKET_NAME")
     if not bucket_name:
         raise ValueError("S3_BUCKET_NAME環境変数が設定されていません")
 
-    start_time = datetime.fromisoformat(transformed_data["start_time"])
-    end_time = datetime.fromisoformat(transformed_data["end_time"])
+    start_time = datetime.fromisoformat(fetched_data["start_time_utc"])
+    end_time = datetime.fromisoformat(fetched_data["end_time_utc"])
 
-    # Hive形式のパーティション構造で保存
-    year = start_time.strftime("%Y")
-    month = start_time.strftime("%m")
-    day = start_time.strftime("%d")
-    hour = start_time.strftime("%H")
+    start_time_jst = start_time.astimezone(JST)
+    end_time_jst = end_time.astimezone(JST)
+
+    year = start_time_jst.strftime("%Y")
+    month = start_time_jst.strftime("%m")
+    day = start_time_jst.strftime("%d")
+    hour = start_time_jst.strftime("%H")
 
     parquet_key = (
-        f"btc-prices/hourly/"
+        "btc-prices/hourly/"
         f"year={year}/month={month}/day={day}/hour={hour}/"
-        f"btc_prices_{start_time.strftime('%Y-%m-%dT%H-%M-%S')}_to_{end_time.strftime('%Y-%m-%dT%H-%M-%S')}.parquet"
+        f"btc_prices_{start_time_jst.strftime('%Y-%m-%dT%H-%M-%S')}"
+        f"_to_{end_time_jst.strftime('%Y-%m-%dT%H-%M-%S')}.parquet"
     )
 
-    # S3Hookを使用してS3に接続
+    parquet_data = base64.b64decode(fetched_data["parquet_data_base64"])
+
     s3_hook = S3Hook(aws_conn_id="aws_default")
-
-    # base64エンコードされたデータをデコード
-    parquet_data = base64.b64decode(transformed_data["parquet_data_base64"])
-
-    # S3にアップロード
     s3_hook.load_bytes(
         bytes_data=parquet_data,
         key=parquet_key,
@@ -205,31 +172,33 @@ def upload_to_s3(**context):
         replace=True,
     )
 
-    print(f"統合データをS3に保存しました: s3://{bucket_name}/{parquet_key}")
+    print(
+        f"CoinGeckoデータをS3に保存しました: s3://{bucket_name}/{parquet_key} "
+        f"(records={fetched_data['record_count']})"
+    )
 
     return {
         "parquet_key": parquet_key,
         "bucket_name": bucket_name,
-        "start_time": transformed_data["start_time"],
-        "end_time": transformed_data["end_time"],
+        "record_count": fetched_data["record_count"],
+        "start_time_utc": fetched_data["start_time_utc"],
+        "end_time_utc": fetched_data["end_time_utc"],
     }
 
 
-# DAG定義
 dag = DAG(
-    "consolidate_hourly_data",
+    "fetch_hourly_data",
     default_args=default_args,
-    description="リアルタイムデータを時間単位で統合（機械学習用）",
-    schedule_interval="0 * * * *",  # 毎時0分に実行（前1時間分を統合）
+    description="CoinGeckoからBTCデータを取得し、1時間ごとにS3へ保存",
+    schedule_interval="0 * * * *",
     start_date=datetime(2024, 1, 1, tzinfo=JST),
     catchup=False,
-    tags=["cryptocurrency", "coingecko", "s3", "consolidation", "ml"],
+    tags=["cryptocurrency", "coingecko", "s3", "hourly"],
 )
 
-# タスク定義
-transform_task = PythonOperator(
-    task_id="transform_data",
-    python_callable=transform_data,
+fetch_task = PythonOperator(
+    task_id="fetch_hourly_data",
+    python_callable=fetch_hourly_data,
     dag=dag,
 )
 
@@ -239,5 +208,5 @@ upload_task = PythonOperator(
     dag=dag,
 )
 
-# タスクの依存関係を設定
-transform_task >> upload_task
+fetch_task >> upload_task
+
