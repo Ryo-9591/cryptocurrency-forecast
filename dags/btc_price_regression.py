@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from typing import Optional
 import pytz
 import pandas as pd
-import numpy as np
 import base64
 import json
 from io import BytesIO
@@ -33,6 +32,15 @@ except ImportError:
 
 # タイムゾーン設定（東京時間）
 JST = pytz.timezone("Asia/Tokyo")
+
+# 訓練データを永続化するS3キー（環境変数で上書き可能）
+TRAINING_DATA_S3_KEY = os.getenv(
+    "TRAINING_DATA_S3_KEY",
+    "btc-prices/ml/training_data/training_data.parquet",
+)
+
+# 予測する時間先（時間単位）
+FORECAST_HORIZON_HOURS = int(os.getenv("FORECAST_HORIZON_HOURS", "4"))
 
 # デフォルト引数
 default_args = {
@@ -69,7 +77,7 @@ def _ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
 
 def load_data_from_s3(**context) -> dict:
     """
-    S3からBTC価格データを読み込む
+    S3からBTC価格データを読み込み、前日分の差分を既存データに追加する
 
     Returns:
         dict: データフレーム（base64エンコード）とメタデータを含む辞書
@@ -79,63 +87,56 @@ def load_data_from_s3(**context) -> dict:
         raise ValueError("S3_BUCKET_NAME環境変数が設定されていません")
 
     s3_hook = S3Hook(aws_conn_id="aws_default")
-    all_dataframes = []
+    existing_df = pd.DataFrame()
+    try:
+        if s3_hook.check_for_key(TRAINING_DATA_S3_KEY, bucket_name=bucket_name):
+            training_obj = s3_hook.get_key(
+                key=TRAINING_DATA_S3_KEY, bucket_name=bucket_name
+            )
+            training_data = training_obj.get()["Body"].read()
+            existing_df = pd.read_parquet(BytesIO(training_data))
+            existing_df = _ensure_timestamp_column(existing_df)
+            print(
+                f"既存訓練データを読み込み: {len(existing_df)} レコード "
+                f"(最終タイムスタンプ: {existing_df['timestamp'].max()})"
+            )
+        else:
+            print("既存訓練データは見つかりませんでした。新規に作成します。")
+    except Exception as e:
+        print(f"既存訓練データの読み込みに失敗しました（無視）: {e}")
+        existing_df = pd.DataFrame()
 
-    # 実行日を取得
     logical_date = context.get("logical_date")
     if logical_date:
-        end_date = logical_date.in_timezone(JST)
+        run_date = logical_date.in_timezone(JST)
     else:
-        end_date = datetime.now(JST)
+        run_date = datetime.now(JST)
 
-    # 過去90日分のデータを取得（訓練用）
-    start_date = end_date - timedelta(days=90)
+    current_day = run_date.date()
+    end_date = JST.localize(datetime.combine(current_day, datetime.min.time()))
+    start_date = end_date - timedelta(days=1)
 
     start_date_utc = start_date.astimezone(pytz.UTC)
     end_date_utc = end_date.astimezone(pytz.UTC)
 
     print(
-        f"データ取得期間: {start_date_utc.date()} から {end_date_utc.date()} (UTC基準)"
+        "差分データ取得期間 (UTC): "
+        f"{start_date_utc.isoformat()} 〜 {end_date_utc.isoformat()}"
     )
 
-    # 1. 過去（historical）データを読み込む
-    try:
-        prefix = "btc-prices/historical/"
-        files = s3_hook.list_keys(bucket_name=bucket_name, prefix=prefix)
+    new_dataframes = []
 
-        for file_key in files:
-            if not file_key.endswith(".parquet"):
-                continue
-            try:
-                file_obj = s3_hook.get_key(key=file_key, bucket_name=bucket_name)
-                parquet_data = file_obj.get()["Body"].read()
-                df = pd.read_parquet(BytesIO(parquet_data))
-
-                df = _ensure_timestamp_column(df)
-                mask = (df["timestamp"] >= start_date_utc) & (
-                    df["timestamp"] <= end_date_utc
-                )
-                df = df[mask]
-
-                if len(df) > 0:
-                    all_dataframes.append(df)
-                    print(f"  読み込み: {file_key} ({len(df)} レコード)")
-            except Exception as e:
-                print(f"  ファイル処理エラー ({file_key}): {e}")
-                continue
-    except Exception as e:
-        print(f"過去データ取得エラー: {e}")
-
-    # 2. 時間単位（hourly）データを読み込む
+    # 差分対象期間の時間単位（hourly）データのみを読み込む
     try:
         current_date = start_date
-        while current_date <= end_date:
-            year = current_date.strftime("%Y")
-            month = current_date.strftime("%m")
-            day = current_date.strftime("%d")
+        while current_date < end_date:
+            current_jst = current_date.astimezone(JST)
+            year = current_jst.strftime("%Y")
+            month = current_jst.strftime("%m")
+            day = current_jst.strftime("%d")
 
             prefix = f"btc-prices/hourly/year={year}/month={month}/day={day}/"
-            files = s3_hook.list_keys(bucket_name=bucket_name, prefix=prefix)
+            files = s3_hook.list_keys(bucket_name=bucket_name, prefix=prefix) or []
 
             for file_key in files:
                 if not file_key.endswith(".parquet"):
@@ -147,34 +148,55 @@ def load_data_from_s3(**context) -> dict:
 
                     df = _ensure_timestamp_column(df)
                     mask = (df["timestamp"] >= start_date_utc) & (
-                        df["timestamp"] <= end_date_utc
+                        df["timestamp"] < end_date_utc
                     )
                     df = df[mask]
 
                     if len(df) > 0:
-                        all_dataframes.append(df)
+                        new_dataframes.append(df)
                 except Exception as e:
-                    print(f"  ファイル処理エラー ({file_key}): {e}")
+                    print(f"  差分ファイル処理エラー ({file_key}): {e}")
                     continue
 
             current_date += timedelta(days=1)
     except Exception as e:
-        print(f"時間単位データ取得エラー: {e}")
+        print(f"差分時間データ取得エラー: {e}")
 
-    if not all_dataframes:
-        raise ValueError("S3からデータを取得できませんでした")
+    if not new_dataframes and existing_df.empty:
+        raise ValueError("S3からデータを取得できませんでした（差分も既存データも空）")
 
-    # データを統合
-    consolidated_df = pd.concat(all_dataframes, ignore_index=True)
+    new_data_df = (
+        pd.concat(new_dataframes, ignore_index=True)
+        if new_dataframes
+        else pd.DataFrame()
+    )
 
-    # タイムスタンプでソート
+    if not new_data_df.empty:
+        new_data_df["timestamp"] = pd.to_datetime(new_data_df["timestamp"], utc=True)
+        if not existing_df.empty:
+            latest_ts = existing_df["timestamp"].max()
+            new_data_df = new_data_df[new_data_df["timestamp"] > latest_ts]
+        print(f"差分データ数: {len(new_data_df)} レコード")
+    else:
+        print("新しい差分データは見つかりませんでした。既存データのみを使用します。")
+
+    if existing_df.empty:
+        consolidated_df = new_data_df.copy()
+    elif new_data_df.empty:
+        consolidated_df = existing_df.copy()
+    else:
+        consolidated_df = pd.concat([existing_df, new_data_df], ignore_index=True)
+
+    if consolidated_df.empty:
+        raise ValueError("結合後のデータが空です")
+
     consolidated_df["timestamp"] = pd.to_datetime(
         consolidated_df["timestamp"], utc=True
     )
-    consolidated_df = consolidated_df.sort_values("timestamp").reset_index(drop=True)
-
-    # 重複を削除
-    consolidated_df = consolidated_df.drop_duplicates(subset=["timestamp"], keep="last")
+    consolidated_df = consolidated_df.sort_values("timestamp").drop_duplicates(
+        subset=["timestamp"], keep="last"
+    )
+    consolidated_df = consolidated_df.reset_index(drop=True)
 
     print(f"統合完了: {len(consolidated_df)} レコード")
     print(
@@ -194,6 +216,7 @@ def load_data_from_s3(**context) -> dict:
             "start": consolidated_df["timestamp"].min().isoformat(),
             "end": consolidated_df["timestamp"].max().isoformat(),
         },
+        "new_records": len(new_data_df),
     }
 
 
@@ -255,7 +278,10 @@ def train_models(**context) -> dict:
 
     # 特徴量とターゲットを準備
     X, y = prepare_features_for_training(
-        df, target_col="usd_price", forecast_horizon=1, drop_na=True
+        df,
+        target_col="usd_price",
+        forecast_horizon=FORECAST_HORIZON_HOURS,
+        drop_na=True,
     )
 
     if len(X) == 0 or len(y) == 0:
@@ -301,9 +327,15 @@ def train_models(**context) -> dict:
                     "train_samples": len(X_train),
                     "val_samples": len(X_val),
                     "features": X_train.shape[1],
+                    "forecast_horizon_hours": FORECAST_HORIZON_HOURS,
                 }
             )
-            results = trainer.train_all_models(X_train, y_train, X_val, y_val)
+            trainer.train_xgboost_model(
+                X_train,
+                y_train,
+                X_val,
+                y_val,
+            )
 
             # 最良のモデルをModel Registryに登録
             try:
@@ -313,7 +345,7 @@ def train_models(**context) -> dict:
             except Exception as e:
                 print(f"Model registration error: {e}")
     else:
-        results = trainer.train_all_models(X_train, y_train, X_val, y_val)
+        trainer.train_xgboost_model(X_train, y_train, X_val, y_val)
 
     # 評価結果を取得
     evaluation_summary = trainer.get_evaluation_summary()
@@ -322,7 +354,7 @@ def train_models(**context) -> dict:
 
     # 最良のモデルを取得
     try:
-        best_model_name, best_model = trainer.get_best_model(
+        best_model_name, best_model = trainer.get_trained_model(
             metric="val_rmse", lower_is_better=True
         )
         print(f"\n最良のモデル: {best_model_name}")
@@ -341,6 +373,7 @@ def train_models(**context) -> dict:
             "all_models_base64": all_models_base64,
             "evaluation_metrics": evaluation_summary.to_dict(),
             "feature_names": list(X.columns),
+            "forecast_horizon_hours": FORECAST_HORIZON_HOURS,
         }
     except Exception as e:
         print(f"最良のモデル取得エラー: {e}")
@@ -357,6 +390,7 @@ def train_models(**context) -> dict:
                 if not evaluation_summary.empty
                 else {},
                 "feature_names": list(X.columns),
+                "forecast_horizon_hours": FORECAST_HORIZON_HOURS,
             }
         else:
             raise ValueError("訓練されたモデルがありません")
@@ -380,12 +414,34 @@ def make_predictions(**context) -> dict:
     parquet_data = base64.b64decode(features_info["parquet_data_base64"])
     df = pd.read_parquet(BytesIO(parquet_data))
 
-    # 最新のデータポイントを使用して予測
-    latest_data = df.iloc[-1:].copy()
+    forecast_horizon = int(
+        train_info.get("forecast_horizon_hours", FORECAST_HORIZON_HOURS)
+    )
 
-    # 特徴量を準備
+    # 学習時と同じ方法で特徴量とターゲットを準備
+    X_prepared, y_prepared = prepare_features_for_training(
+        df,
+        target_col="usd_price",
+        forecast_horizon=forecast_horizon,
+        drop_na=True,
+    )
+
+    if X_prepared.empty or y_prepared.empty:
+        raise ValueError("予測に使用できるデータポイントがありません")
+
+    # 最新のサンプルを使用して予測
+    latest_index = X_prepared.index[-1]
+    X_latest = X_prepared.loc[[latest_index]]
+    actual_future_price = y_prepared.loc[latest_index]
+
     feature_names = train_info["feature_names"]
-    X_latest = latest_data[feature_names]
+    missing_features = set(feature_names) - set(X_latest.columns)
+    if missing_features:
+        raise ValueError(f"不足している特徴量があります: {missing_features}")
+    X_latest = X_latest[feature_names]
+
+    base_timestamp = df.loc[latest_index, "timestamp"]
+    base_price = df.loc[latest_index, "usd_price"]
 
     # モデルを読み込む
     import pickle
@@ -395,25 +451,38 @@ def make_predictions(**context) -> dict:
 
     # 予測を実行
     prediction = model.predict(X_latest)[0]
-    actual_price = latest_data["usd_price"].iloc[0]
+
+    target_timestamp = pd.to_datetime(base_timestamp, utc=True) + timedelta(
+        hours=forecast_horizon
+    )
 
     # 予測結果
     result = {
-        "timestamp": latest_data["timestamp"].iloc[0].isoformat(),
-        "actual_price": float(actual_price),
+        "base_timestamp": pd.to_datetime(base_timestamp, utc=True).isoformat(),
+        "target_timestamp": target_timestamp.isoformat(),
+        "baseline_price": float(base_price),
+        "actual_future_price": float(actual_future_price),
         "predicted_price": float(prediction),
-        "prediction_error": float(abs(prediction - actual_price)),
+        "prediction_error": float(abs(prediction - actual_future_price)),
         "prediction_error_pct": float(
-            abs(prediction - actual_price) / actual_price * 100
-        ),
+            abs(prediction - actual_future_price) / actual_future_price * 100
+        )
+        if actual_future_price != 0
+        else None,
+        "forecast_horizon_hours": forecast_horizon,
         "model_name": train_info["best_model_name"],
     }
 
-    print(f"\n予測結果:")
-    print(f"  実際の価格: ${actual_price:,.2f}")
+    print("\n予測結果:")
+    print(f"  基準時刻: {result['base_timestamp']}")
+    print(f"  予測対象時刻: {result['target_timestamp']}")
+    print(f"  現在価格: ${base_price:,.2f}")
+    print(f"  実際の将来価格: ${actual_future_price:,.2f}")
     print(f"  予測価格: ${prediction:,.2f}")
     print(
         f"  誤差: ${result['prediction_error']:,.2f} ({result['prediction_error_pct']:.2f}%)"
+        if result["prediction_error_pct"] is not None
+        else f"  誤差: ${result['prediction_error']:,.2f} (実際の価格が0のため割合計算不可)"
     )
 
     return result
@@ -429,6 +498,7 @@ def save_results_to_s3(**context) -> dict:
     ti = context["ti"]
     train_info = ti.xcom_pull(task_ids="train_models")
     prediction_info = ti.xcom_pull(task_ids="make_predictions")
+    raw_data_info = ti.xcom_pull(task_ids="load_data_from_s3")
 
     if not train_info:
         raise ValueError("訓練結果が取得できませんでした")
@@ -453,7 +523,13 @@ def save_results_to_s3(**context) -> dict:
 
     # 1. 評価結果をJSON形式で保存
     evaluation_metrics = train_info.get("evaluation_metrics", {})
-    evaluation_json = json.dumps(evaluation_metrics, indent=2, default=str)
+    evaluation_payload = {
+        "forecast_horizon_hours": train_info.get(
+            "forecast_horizon_hours", FORECAST_HORIZON_HOURS
+        ),
+        "metrics": evaluation_metrics,
+    }
+    evaluation_json = json.dumps(evaluation_payload, indent=2, default=str)
     evaluation_key = (
         f"btc-prices/ml/evaluation/{date_str}/evaluation_{timestamp_str}.json"
     )
@@ -481,7 +557,22 @@ def save_results_to_s3(**context) -> dict:
         saved_files.append(prediction_key)
         print(f"予測結果を保存: s3://{bucket_name}/{prediction_key}")
 
-    # 3. 最良のモデルを保存（オプション）
+    # 3. 訓練データを更新して保存
+    if raw_data_info:
+        try:
+            training_bytes = base64.b64decode(raw_data_info["parquet_data_base64"])
+            s3_hook.load_bytes(
+                bytes_data=training_bytes,
+                key=TRAINING_DATA_S3_KEY,
+                bucket_name=bucket_name,
+                replace=True,
+            )
+            saved_files.append(TRAINING_DATA_S3_KEY)
+            print(f"訓練データを更新: s3://{bucket_name}/{TRAINING_DATA_S3_KEY}")
+        except Exception as e:
+            print(f"訓練データの保存に失敗しました（無視）: {e}")
+
+    # 4. 最良のモデルを保存（オプション）
     try:
         model_key = f"btc-prices/ml/models/{date_str}/model_{train_info['best_model_name']}_{timestamp_str}.pkl"
         model_bytes = base64.b64decode(train_info["best_model_base64"])
@@ -494,13 +585,16 @@ def save_results_to_s3(**context) -> dict:
         saved_files.append(model_key)
         print(f"モデルを保存: s3://{bucket_name}/{model_key}")
 
-        # 4. 特徴量名を保存（リアルタイム予測で使用）
+        # 5. 特徴量名を保存（リアルタイム予測で使用）
         feature_names = train_info.get("feature_names", [])
         feature_info = {
             "feature_names": feature_names,
             "model_name": train_info["best_model_name"],
             "model_key": model_key,
             "timestamp": timestamp_str,
+            "forecast_horizon_hours": train_info.get(
+                "forecast_horizon_hours", FORECAST_HORIZON_HOURS
+            ),
         }
         feature_info_json = json.dumps(feature_info, indent=2, default=str)
         feature_info_key = f"btc-prices/ml/models/{date_str}/features_{train_info['best_model_name']}_{timestamp_str}.json"
