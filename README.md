@@ -8,6 +8,7 @@ CoinGecko APIからBTC（ビットコイン）の価格情報を取得し、Amaz
 - データをCSVとParquet形式に変換
 - Amazon S3に自動アップロード
 - 定期実行（デフォルト: 毎日）
+- FastAPIによる推論エンドポイントとReact UIでのBTC価格可視化・予測実行
 
 ## 前提条件
 
@@ -35,7 +36,7 @@ cp .env.example .env
 - `_AIRFLOW_WWW_USER_USERNAME`: Airflow Web UIのユーザー名（デフォルト: `airflow`）
 - `_AIRFLOW_WWW_USER_PASSWORD`: Airflow Web UIのパスワード（デフォルト: `airflow`）
 
-### 2. Airflowの初期化と起動
+### 2. Airflow・API・UIの起動
 
 ```bash
 # Airflow UIDを設定（Linux/Macの場合）
@@ -44,20 +45,28 @@ export AIRFLOW_UID=$(id -u)
 # Windows PowerShellの場合
 $env:AIRFLOW_UID = 50000
 
-# Docker Composeでサービスを起動
+# Docker Composeで主要サービスを起動
+docker-compose up -d postgres mlflow fastapi frontend
+
+# Airflowも含めて全てのサービスを起動する場合
 docker-compose up -d
 ```
 
-### 3. Airflow Web UIへのアクセス
+### 3. 各サービスへのアクセス
 
-ブラウザで以下のURLにアクセス：
-- URL: http://localhost:8080
-- ユーザー名: `.env`ファイルの`_AIRFLOW_WWW_USER_USERNAME`で設定した値（デフォルト: `airflow`）
-- パスワード: `.env`ファイルの`_AIRFLOW_WWW_USER_PASSWORD`で設定した値（デフォルト: `airflow`）
+- Airflow Web UI: http://localhost:8080
+  - ユーザー名: `.env`ファイルの`_AIRFLOW_WWW_USER_USERNAME`（デフォルト: `airflow`）
+  - パスワード: `.env`ファイルの`_AIRFLOW_WWW_USER_PASSWORD`（デフォルト: `airflow`）
+- BTC予測UI（React）: http://localhost:8081
+  - FastAPIエンドポイント `http://localhost:8000` に接続して最新データと予測を取得します。
 
 **注意**: 初回起動時は、ログに自動生成されたパスワードが表示される場合があります。環境変数で設定した値を使用してください。
 
-### 4. AWS接続の設定
+### 4. Airflow Web UIへのアクセス詳細
+
+ブラウザで上記URLにアクセスし、`.env`で指定した認証情報を使用してログインしてください。
+
+### 5. AWS接続の設定
 
 Airflow Web UIでAWS接続を設定：
 
@@ -71,6 +80,15 @@ Airflow Web UIでAWS接続を設定：
    - **Extra**: `{"region_name": "ap-northeast-1"}`（リージョンを変更する場合）
 
 または、環境変数で設定している場合は、接続設定は不要です。
+
+## Reactフロントエンドでの予測ワークフロー
+
+1. `http://localhost:8081` にアクセスし、最新のBTC価格チャートを確認します。
+2. 「予測を実行」ボタンをクリックするとFastAPIの`/predict`エンドポイントにリクエストが送信され、チャートに予測ラインが追加されます。
+3. プルダウンで表示期間（24/48/72/96時間）を切り替え、必要に応じて再度予測を実行してください。
+4. 予測が失敗した場合は画面にエラーが表示されるため、FastAPIログを確認してください。
+
+`VITE_API_BASE_URL`を変更すると、UIが接続するAPIエンドポイントを切り替えられます（Dockerビルド時に反映、ローカル環境では `http://localhost:8000` を推奨）。
 
 ## DAGの実行
 

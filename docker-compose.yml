@@ -240,6 +240,7 @@ services:
       MLFLOW_MODEL_STAGE: ${MLFLOW_MODEL_STAGE:-Production}
       FORECAST_HORIZON_HOURS: ${FORECAST_HORIZON_HOURS:-4}
       FASTAPI_MAX_HOURLY_FILES: ${FASTAPI_MAX_HOURLY_FILES:-96}
+      FRONTEND_CORS_ORIGINS: ${FRONTEND_CORS_ORIGINS:-http://localhost:8081,http://frontend}
     ports:
       - "8000:8000"
     depends_on:
@@ -250,6 +251,37 @@ services:
       - ./app:/app/app:ro
     restart: always
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    image: cryptocurrency-forecast-frontend:latest
+    container_name: crypto-frontend
+    ports:
+      - "8081:80"
+    depends_on:
+      fastapi:
+        condition: service_started
+    restart: always
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      fastapi:
+        condition: service_started
+    restart: always
+
 volumes:
   postgres-db-volume:
   mlflow-data:
+  grafana-data:

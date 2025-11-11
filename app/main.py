@@ -7,7 +7,8 @@ from typing import Optional, Sequence
 import boto3
 import mlflow
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from utils.feature_engineering import create_all_features, prepare_features_for_training
@@ -54,6 +55,24 @@ class HealthResponse(BaseModel):
     model_version: Optional[str]
 
 
+class PricePoint(BaseModel):
+    timestamp: str
+    price: float
+
+
+class TimeSeriesResponse(BaseModel):
+    points: list[PricePoint]
+
+
+def _parse_cors_origins() -> list[str]:
+    raw = os.getenv(
+        "FRONTEND_CORS_ORIGINS",
+        "http://localhost:3000,http://localhost:8081",
+    )
+    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return origins or ["http://localhost:3000"]
+
+
 class ModelService:
     def __init__(self) -> None:
         self.mlflow_tracking_uri = os.getenv(
@@ -97,7 +116,7 @@ class ModelService:
         if not keys:
             return []
         keys.sort()
-        return keys[-MAX_HOURLY_FILES :]
+        return keys[-MAX_HOURLY_FILES:]
 
     def _load_hourly_dataframe(self) -> pd.DataFrame:
         keys = self._list_recent_keys()
@@ -185,6 +204,29 @@ class ModelService:
             else None,
         )
 
+    def get_recent_prices(self, hours: int) -> list[PricePoint]:
+        if hours <= 0:
+            raise ValueError("hours は1以上を指定してください")
+
+        df = self._load_hourly_dataframe()
+        cutoff = datetime.now(tz=UTC) - timedelta(hours=hours)
+        df = df[df["timestamp"] >= cutoff]
+        df = df.sort_values("timestamp")
+
+        if df.empty:
+            raise ValueError("指定された時間範囲に価格データが存在しません")
+
+        if "usd_price" not in df.columns:
+            raise ValueError("データセットに usd_price 列が存在しません")
+
+        return [
+            PricePoint(
+                timestamp=pd.to_datetime(row["timestamp"], utc=True).isoformat(),
+                price=float(row["usd_price"]),
+            )
+            for _, row in df.iterrows()
+        ]
+
 
 @lru_cache(maxsize=1)
 def get_model_service() -> ModelService:
@@ -192,6 +234,14 @@ def get_model_service() -> ModelService:
 
 
 app = FastAPI(title="BTC Price Prediction API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_parse_cors_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -215,3 +265,16 @@ def predict() -> PredictionResponse:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+
+@app.get("/timeseries", response_model=TimeSeriesResponse)
+def get_timeseries(hours: int = Query(96, ge=1)) -> TimeSeriesResponse:
+    service = get_model_service()
+    clamped_hours = min(hours, MAX_HOURLY_FILES)
+    try:
+        points = service.get_recent_prices(clamped_hours)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return TimeSeriesResponse(points=points)
