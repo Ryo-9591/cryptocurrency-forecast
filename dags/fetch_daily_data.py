@@ -1,5 +1,6 @@
 """
-CoinGeckoからBTCの相場情報を取得し、1時間ごとにS3へ保存するDAG
+CoinGeckoからBTCの相場情報を取得し、日次でS3に蓄積するDAG。
+初回実行時は過去365日分を取得し、以降は前回取得分の続きのみを追加保存する。
 """
 
 import base64
@@ -9,6 +10,7 @@ from io import BytesIO
 from typing import Optional
 
 import pandas as pd
+import pendulum
 import pytz
 import requests
 from airflow import DAG
@@ -70,29 +72,63 @@ def _series_to_df(series: list, value_column: str) -> Optional[pd.DataFrame]:
     return df[[value_column]]
 
 
-def fetch_hourly_data(**context) -> dict:
+def _load_last_synced_timestamp(
+    s3_hook: S3Hook, bucket_name: str
+) -> Optional[pendulum.DateTime]:
+    state_key = "btc-prices/state/last_synced_timestamp.txt"
+    if not s3_hook.check_for_key(key=state_key, bucket_name=bucket_name):
+        return None
+    content = s3_hook.read_key(key=state_key, bucket_name=bucket_name).strip()
+    if not content:
+        return None
+    return pendulum.parse(content)
+
+
+def _store_last_synced_timestamp(
+    s3_hook: S3Hook, bucket_name: str, timestamp: pendulum.DateTime
+) -> None:
+    state_key = "btc-prices/state/last_synced_timestamp.txt"
+    s3_hook.load_string(
+        string_data=timestamp.to_iso8601_string(),
+        key=state_key,
+        bucket_name=bucket_name,
+        replace=True,
+    )
+
+
+def fetch_daily_data(**context) -> dict:
     api_key = os.getenv("COINGECKO_API_KEY")
     if not api_key:
         raise ValueError("COINGECKO_API_KEY環境変数が設定されていません")
 
+    bucket_name = os.getenv("S3_BUCKET_NAME")
+    if not bucket_name:
+        raise ValueError("S3_BUCKET_NAME環境変数が設定されていません")
+
+    s3_hook = S3Hook(aws_conn_id="aws_default")
+    last_synced = _load_last_synced_timestamp(s3_hook, bucket_name)
+
+    data_interval_end = context.get("data_interval_end")
     logical_date = context.get("logical_date")
-    if logical_date:
-        end_time_jst = logical_date.in_timezone(JST)
+    if data_interval_end:
+        end_time_utc = data_interval_end.in_timezone("UTC")
+    elif logical_date:
+        end_time_utc = logical_date.in_timezone("UTC")
     else:
-        end_time_jst = datetime.now(JST)
-    start_time_jst = end_time_jst - timedelta(hours=1)
-
-    start_time_utc = start_time_jst.astimezone(UTC)
-    end_time_utc = end_time_jst.astimezone(UTC)
-
-    earliest_allowed_utc = datetime.now(UTC) - timedelta(days=365)
+        end_time_utc = pendulum.now("UTC")
+    earliest_allowed_utc = pendulum.now("UTC").subtract(days=365)
     if end_time_utc <= earliest_allowed_utc:
         raise AirflowSkipException(
             "CoinGecko無料プランでは過去365日より前のデータは取得できないためスキップします。"
         )
-    if start_time_utc < earliest_allowed_utc:
+
+    if last_synced:
+        start_time_utc = max(last_synced.add(seconds=1), earliest_allowed_utc)
+    else:
         start_time_utc = earliest_allowed_utc
-        start_time_jst = start_time_utc.astimezone(JST)
+
+    if start_time_utc >= end_time_utc:
+        raise AirflowSkipException("取得済みのデータのためスキップします。")
 
     print(
         f"CoinGeckoからデータ取得: {start_time_utc.isoformat()} 〜 "
@@ -132,6 +168,9 @@ def fetch_hourly_data(**context) -> dict:
     parquet_data = parquet_buffer.getvalue()
     parquet_data_base64 = base64.b64encode(parquet_data).decode("utf-8")
 
+    latest_timestamp = df["timestamp"].max()
+    latest_timestamp_utc = pendulum.instance(latest_timestamp.to_pydatetime())
+
     print(f"取得データ: {len(df)} レコード, Parquetサイズ: {len(parquet_data)} bytes")
 
     return {
@@ -139,34 +178,35 @@ def fetch_hourly_data(**context) -> dict:
         "record_count": len(df),
         "start_time_utc": start_time_utc.isoformat(),
         "end_time_utc": end_time_utc.isoformat(),
+        "latest_timestamp_utc": latest_timestamp_utc.to_iso8601_string(),
+        "bucket_name": bucket_name,
     }
 
 
 def upload_to_s3(**context) -> dict:
     ti = context["ti"]
-    fetched_data = ti.xcom_pull(task_ids="fetch_hourly_data")
+    fetched_data = ti.xcom_pull(task_ids="fetch_daily_data")
 
     if not fetched_data:
         raise ValueError("取得データがXComから取得できませんでした")
 
-    bucket_name = os.getenv("S3_BUCKET_NAME")
+    bucket_name = fetched_data.get("bucket_name") or os.getenv("S3_BUCKET_NAME")
     if not bucket_name:
         raise ValueError("S3_BUCKET_NAME環境変数が設定されていません")
 
     start_time = datetime.fromisoformat(fetched_data["start_time_utc"])
     end_time = datetime.fromisoformat(fetched_data["end_time_utc"])
 
-    start_time_jst = start_time.astimezone(JST)
-    end_time_jst = end_time.astimezone(JST)
+    start_time_jst = pendulum.instance(start_time, tz=UTC).in_timezone(JST)
+    end_time_jst = pendulum.instance(end_time, tz=UTC).in_timezone(JST)
 
     year = start_time_jst.strftime("%Y")
     month = start_time_jst.strftime("%m")
     day = start_time_jst.strftime("%d")
-    hour = start_time_jst.strftime("%H")
 
     parquet_key = (
-        "btc-prices/hourly/"
-        f"year={year}/month={month}/day={day}/hour={hour}/"
+        "btc-prices/daily/"
+        f"year={year}/month={month}/day={day}/"
         f"btc_prices_{start_time_jst.strftime('%Y-%m-%dT%H-%M-%S')}"
         f"_to_{end_time_jst.strftime('%Y-%m-%dT%H-%M-%S')}.parquet"
     )
@@ -186,6 +226,9 @@ def upload_to_s3(**context) -> dict:
         f"(records={fetched_data['record_count']})"
     )
 
+    latest_timestamp_utc = pendulum.parse(fetched_data["latest_timestamp_utc"])
+    _store_last_synced_timestamp(s3_hook, bucket_name, latest_timestamp_utc)
+
     return {
         "parquet_key": parquet_key,
         "bucket_name": bucket_name,
@@ -196,18 +239,18 @@ def upload_to_s3(**context) -> dict:
 
 
 dag = DAG(
-    "fetch_hourly_data",
+    "fetch_daily_data",
     default_args=default_args,
-    description="CoinGeckoからBTCデータを取得し、1時間ごとにS3へ保存",
-    schedule_interval="0 * * * *",
+    description="CoinGeckoからBTCデータを取得し、日次でS3へ保存",
+    schedule_interval="0 1 * * *",
     start_date=datetime(2024, 1, 1, tzinfo=JST),
     catchup=True,
-    tags=["cryptocurrency", "coingecko", "s3", "hourly"],
+    tags=["cryptocurrency", "coingecko", "s3", "daily"],
 )
 
 fetch_task = PythonOperator(
-    task_id="fetch_hourly_data",
-    python_callable=fetch_hourly_data,
+    task_id="fetch_daily_data",
+    python_callable=fetch_daily_data,
     dag=dag,
 )
 
