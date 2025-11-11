@@ -1,12 +1,11 @@
 import os
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-from io import BytesIO
-from typing import Optional, Sequence
+from typing import Optional
 
-import boto3
 import mlflow
 import pandas as pd
+import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -20,11 +19,10 @@ TIME_COLUMNS = {"timestamp", "timestamp_jst", "retrieved_at"}
 
 DEFAULT_FORECAST_HORIZON = int(os.getenv("FORECAST_HORIZON_HOURS", "4"))
 MAX_HOURLY_FILES = int(os.getenv("FASTAPI_MAX_HOURLY_FILES", "96"))
-S3_HOURLY_PREFIX = os.getenv("HOURLY_S3_PREFIX", "btc-prices/hourly/")
-S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
-
-if not S3_BUCKET_NAME:
-    raise RuntimeError("S3_BUCKET_NAME 環境変数が設定されていません")
+COINGECKO_API_BASE = os.getenv("COINGECKO_API_BASE", "https://api.coingecko.com/api/v3")
+COINGECKO_COIN_ID = os.getenv("COINGECKO_COIN_ID", "bitcoin")
+COINGECKO_VS_CURRENCY = os.getenv("COINGECKO_VS_CURRENCY", "usd")
+COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
 
 
 def _ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
@@ -73,6 +71,73 @@ def _parse_cors_origins() -> list[str]:
     return origins or ["http://localhost:3000"]
 
 
+class CoinGeckoClient:
+    def __init__(
+        self,
+        base_url: str = COINGECKO_API_BASE,
+        coin_id: str = COINGECKO_COIN_ID,
+        vs_currency: str = COINGECKO_VS_CURRENCY,
+        api_key: Optional[str] = COINGECKO_API_KEY,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.coin_id = coin_id
+        self.vs_currency = vs_currency
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "User-Agent": "cryptocurrency-forecast/1.0",
+                "Accept": "application/json",
+            }
+        )
+        if api_key:
+            self.session.headers["x-cg-pro-api-key"] = api_key
+
+    def fetch_recent_hours(self, hours: int) -> pd.DataFrame:
+        end = datetime.now(tz=UTC)
+        start = end - timedelta(hours=hours)
+        return self._fetch_range(start, end)
+
+    def _fetch_range(self, start: datetime, end: datetime) -> pd.DataFrame:
+        params = {
+            "vs_currency": self.vs_currency,
+            "from": int(start.timestamp()),
+            "to": int(end.timestamp()),
+        }
+        url = f"{self.base_url}/coins/{self.coin_id}/market_chart/range"
+
+        try:
+            response = self.session.get(url, params=params, timeout=15)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"CoinGecko APIリクエストに失敗しました: {exc}") from exc
+
+        payload = response.json()
+        prices = payload.get("prices")
+        if not prices:
+            raise ValueError("CoinGecko APIから価格データを取得できませんでした")
+
+        df_prices = pd.DataFrame(prices, columns=["timestamp_ms", "usd_price"])
+        df_prices["timestamp"] = pd.to_datetime(
+            df_prices["timestamp_ms"], unit="ms", utc=True, errors="coerce"
+        )
+        df_prices = df_prices.dropna(subset=["timestamp"])
+        df_prices = df_prices.drop(columns=["timestamp_ms"])
+        df_prices = df_prices.sort_values("timestamp").drop_duplicates(
+            subset=["timestamp"], keep="last"
+        )
+
+        df_prices = (
+            df_prices.set_index("timestamp")
+            .resample("1H")
+            .last()
+            .ffill()
+            .dropna()
+            .reset_index()
+        )
+
+        return df_prices
+
+
 class ModelService:
     def __init__(self) -> None:
         self.mlflow_tracking_uri = os.getenv(
@@ -80,6 +145,7 @@ class ModelService:
         )
         self.model_name = os.getenv("MLFLOW_MODEL_NAME", "btc-price-prediction")
         self.model_stage = os.getenv("MLFLOW_MODEL_STAGE", "Production")
+        self.market_client = CoinGeckoClient()
 
         mlflow.set_tracking_uri(self.mlflow_tracking_uri)
         self.model_uri = f"models:/{self.model_name}/{self.model_stage}"
@@ -101,49 +167,17 @@ class ModelService:
             # バージョン情報が取得できなくても推論は継続できる
             self.model_version = None
 
-        self.s3_client = boto3.client("s3")
-
-    def _list_recent_keys(self) -> Sequence[str]:
-        paginator = self.s3_client.get_paginator("list_objects_v2")
-        pages = paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix=S3_HOURLY_PREFIX)
-        keys: list[str] = []
-        for page in pages:
-            contents = page.get("Contents", [])
-            for obj in contents:
-                key = obj.get("Key")
-                if key and key.endswith(".parquet"):
-                    keys.append(key)
-        if not keys:
-            return []
-        keys.sort()
-        return keys[-MAX_HOURLY_FILES:]
-
     def _load_hourly_dataframe(self) -> pd.DataFrame:
-        keys = self._list_recent_keys()
-        if not keys:
-            raise ValueError("S3に利用可能なhourlyデータが存在しません")
-
-        frames: list[pd.DataFrame] = []
-        for key in keys:
-            try:
-                obj = self.s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=key)
-                data = obj["Body"].read()
-                df = pd.read_parquet(BytesIO(data))
-                df = _ensure_timestamp_column(df)
-                frames.append(df)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[predict] S3読み込み失敗 ({key}): {exc}")
-                continue
-
-        if not frames:
-            raise ValueError("S3から読み込んだhourlyデータが空です")
-
-        df = pd.concat(frames, ignore_index=True)
+        hours = MAX_HOURLY_FILES + 48
+        df = self.market_client.fetch_recent_hours(hours)
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         df = df.sort_values("timestamp").drop_duplicates(
             subset=["timestamp"], keep="last"
         )
         df = df.reset_index(drop=True)
+        if "usd_price" not in df.columns:
+            raise ValueError("価格データに usd_price 列が含まれていません")
+        df["usd_price"] = df["usd_price"].astype(float)
         return df
 
     def _prepare_latest_sample(

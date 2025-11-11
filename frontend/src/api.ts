@@ -24,8 +24,20 @@ const API_BASE_URL =
 
 async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `request failed: ${response.status}`);
+    const raw = await response.text();
+    let message = raw || `request failed: ${response.status}`;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && "detail" in parsed) {
+        const detail = (parsed as { detail?: unknown }).detail;
+        if (typeof detail === "string") {
+          message = detail;
+        }
+      }
+    } catch {
+      // JSONではない場合はそのまま
+    }
+    throw new Error(message);
   }
   return (await response.json()) as T;
 }

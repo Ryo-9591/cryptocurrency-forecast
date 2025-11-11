@@ -29,7 +29,11 @@ export default function App() {
         setError(null);
       } catch (err) {
         console.error(err);
-        setError("価格データの取得に失敗しました。APIを確認してください。");
+        const message =
+          err instanceof Error
+            ? err.message
+            : "価格データの取得に失敗しました。APIを確認してください。";
+        setError(message);
       } finally {
         setLoadingInitial(false);
       }
@@ -53,7 +57,11 @@ export default function App() {
       setError(null);
     } catch (err) {
       console.error(err);
-      setError("予測リクエストに失敗しました。APIログを確認してください。");
+      const message =
+        err instanceof Error
+          ? err.message
+          : "予測リクエストに失敗しました。APIログを確認してください。";
+      setError(message);
     } finally {
       setLoadingPrediction(false);
     }

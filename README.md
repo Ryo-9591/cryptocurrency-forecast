@@ -33,6 +33,9 @@ cp .env.example .env
 - `AWS_DEFAULT_REGION`: AWSリージョン（例: ap-northeast-1）
 - `S3_BUCKET_NAME`: S3バケット名
 - `COINGECKO_API_KEY`: CoinGecko APIキー（オプション、無料プランでも使用可能）
+- `COINGECKO_API_BASE`: CoinGecko APIのベースURL（デフォルト: `https://api.coingecko.com/api/v3`）
+- `COINGECKO_COIN_ID`: 取得対象のコインID（デフォルト: `bitcoin`）
+- `COINGECKO_VS_CURRENCY`: 価格を取得する通貨（デフォルト: `usd`）
 - `_AIRFLOW_WWW_USER_USERNAME`: Airflow Web UIのユーザー名（デフォルト: `airflow`）
 - `_AIRFLOW_WWW_USER_PASSWORD`: Airflow Web UIのパスワード（デフォルト: `airflow`）
 
@@ -89,6 +92,7 @@ Airflow Web UIでAWS接続を設定：
 4. 予測が失敗した場合は画面にエラーが表示されるため、FastAPIログを確認してください。
 
 `VITE_API_BASE_URL`を変更すると、UIが接続するAPIエンドポイントを切り替えられます（Dockerビルド時に反映、ローカル環境では `http://localhost:8000` を推奨）。
+FastAPIの`/timeseries`エンドポイントは、CoinGeckoの`/market_chart/range` APIから最新価格を直接取得し、チャートに即時反映します。APIキーを設定すると有料プランのレート制限に対応できます。
 
 ## DAGの実行
 
