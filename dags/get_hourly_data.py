@@ -192,7 +192,7 @@ dag = DAG(
     description="CoinGeckoからBTCデータを取得し、1時間ごとにS3へ保存",
     schedule_interval="0 * * * *",
     start_date=datetime(2024, 1, 1, tzinfo=JST),
-    catchup=False,
+    catchup=True,
     tags=["cryptocurrency", "coingecko", "s3", "hourly"],
 )
 
