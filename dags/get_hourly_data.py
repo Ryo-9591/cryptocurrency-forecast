@@ -85,6 +85,15 @@ def fetch_hourly_data(**context) -> dict:
     start_time_utc = start_time_jst.astimezone(UTC)
     end_time_utc = end_time_jst.astimezone(UTC)
 
+    earliest_allowed_utc = datetime.now(UTC) - timedelta(days=365)
+    if end_time_utc <= earliest_allowed_utc:
+        raise AirflowSkipException(
+            "CoinGecko無料プランでは過去365日より前のデータは取得できないためスキップします。"
+        )
+    if start_time_utc < earliest_allowed_utc:
+        start_time_utc = earliest_allowed_utc
+        start_time_jst = start_time_utc.astimezone(JST)
+
     print(
         f"CoinGeckoからデータ取得: {start_time_utc.isoformat()} 〜 "
         f"{end_time_utc.isoformat()} (UTC)"
