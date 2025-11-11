@@ -42,6 +42,12 @@ TRAINING_DATA_S3_KEY = os.getenv(
 # 予測する時間先（時間単位）
 FORECAST_HORIZON_HOURS = int(os.getenv("FORECAST_HORIZON_HOURS", "4"))
 
+# MLflowモデルの自動昇格設定
+AUTO_PROMOTE_MLFLOW_MODEL = (
+    os.getenv("AUTO_PROMOTE_MLFLOW_MODEL", "true").lower() == "true"
+)
+TARGET_MLFLOW_STAGE = os.getenv("MLFLOW_MODEL_STAGE", "Production")
+
 # デフォルト引数
 default_args = {
     "owner": "airflow",
@@ -73,6 +79,37 @@ def _ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
             return df
 
     raise KeyError("timestamp")
+
+
+def _promote_latest_mlflow_model(model_name: str, stage: str) -> Optional[str]:
+    try:
+        import mlflow
+        from mlflow.tracking import MlflowClient
+    except ImportError:
+        print("MLflowライブラリが見つからないためモデル昇格をスキップします")
+        return None
+
+    try:
+        client = MlflowClient()
+        versions = client.search_model_versions(f"name='{model_name}'")
+        if not versions:
+            print(f"Model {model_name} に登録済みバージョンがありません")
+            return None
+
+        latest = max(versions, key=lambda v: v.creation_timestamp)
+        client.transition_model_version_stage(
+            name=model_name,
+            version=latest.version,
+            stage=stage,
+            archive_existing_versions=True,
+        )
+        print(
+            f"Model {model_name} version {latest.version} を {stage} ステージに昇格しました"
+        )
+        return latest.version
+    except Exception as exc:  # noqa: BLE001
+        print(f"モデル昇格処理でエラーが発生しました: {exc}")
+        return None
 
 
 def load_data_from_s3(**context) -> dict:
@@ -231,6 +268,8 @@ def train_models(**context) -> dict:
     print(f"訓練データ: {len(X_train)} サンプル")
     print(f"検証データ: {len(X_val)} サンプル")
 
+    promoted_model_version: Optional[str] = None
+
     # モデルを訓練（MLflow統合）
     use_mlflow = os.getenv("USE_MLFLOW", "true").lower() == "true"
     trainer = ModelTrainer(random_state=42, use_mlflow=use_mlflow)
@@ -278,6 +317,15 @@ def train_models(**context) -> dict:
                     mlflow.log_param("registered_model_uri", model_uri)
             except Exception as e:
                 print(f"Model registration error: {e}")
+        if AUTO_PROMOTE_MLFLOW_MODEL:
+            try:
+                promoted_model_version = _promote_latest_mlflow_model(
+                    model_name=os.getenv("MLFLOW_MODEL_NAME", "btc-price-prediction"),
+                    stage=TARGET_MLFLOW_STAGE,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"モデル昇格処理の例外（無視）: {e}")
+
     else:
         trainer.train_xgboost_model(X_train, y_train, X_val, y_val)
 
@@ -313,6 +361,7 @@ def train_models(**context) -> dict:
             "evaluation_metrics": evaluation_summary.to_dict(),
             "feature_names": feature_names,
             "forecast_horizon_hours": FORECAST_HORIZON_HOURS,
+            "promoted_model_version": promoted_model_version,
         }
     except Exception as e:
         print(f"最良のモデル取得エラー: {e}")
@@ -335,6 +384,7 @@ def train_models(**context) -> dict:
                 else {},
                 "feature_names": feature_names,
                 "forecast_horizon_hours": FORECAST_HORIZON_HOURS,
+                "promoted_model_version": promoted_model_version,
             }
         else:
             raise ValueError("訓練されたモデルがありません")
