@@ -241,6 +241,7 @@ services:
       FORECAST_HORIZON_HOURS: ${FORECAST_HORIZON_HOURS:-4}
       FASTAPI_MAX_HOURLY_FILES: ${FASTAPI_MAX_HOURLY_FILES:-96}
       FRONTEND_CORS_ORIGINS: ${FRONTEND_CORS_ORIGINS:-http://localhost:8081,http://frontend}
+      FRONTEND_CORS_REGEX: ${FRONTEND_CORS_REGEX:-https?://localhost(:\d+)?$}
     ports:
       - "8000:8000"
     depends_on:

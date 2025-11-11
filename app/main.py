@@ -71,6 +71,13 @@ def _parse_cors_origins() -> list[str]:
     return origins or ["http://localhost:3000"]
 
 
+def _parse_cors_regex() -> Optional[str]:
+    raw = os.getenv("FRONTEND_CORS_REGEX", "").strip()
+    if raw:
+        return raw
+    return r"https?://localhost(:\d+)?$"
+
+
 class CoinGeckoClient:
     def __init__(
         self,
@@ -138,6 +145,11 @@ class CoinGeckoClient:
         return df_prices
 
 
+@lru_cache(maxsize=1)
+def get_market_client() -> CoinGeckoClient:
+    return CoinGeckoClient()
+
+
 class ModelService:
     def __init__(self) -> None:
         self.mlflow_tracking_uri = os.getenv(
@@ -145,7 +157,7 @@ class ModelService:
         )
         self.model_name = os.getenv("MLFLOW_MODEL_NAME", "btc-price-prediction")
         self.model_stage = os.getenv("MLFLOW_MODEL_STAGE", "Production")
-        self.market_client = CoinGeckoClient()
+        self.market_client = get_market_client()
 
         mlflow.set_tracking_uri(self.mlflow_tracking_uri)
         self.model_uri = f"models:/{self.model_name}/{self.model_stage}"
@@ -272,6 +284,7 @@ app = FastAPI(title="BTC Price Prediction API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_parse_cors_origins(),
+    allow_origin_regex=_parse_cors_regex(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -290,7 +303,11 @@ def health() -> HealthResponse:
 
 @app.post("/predict", response_model=PredictionResponse)
 def predict() -> PredictionResponse:
-    service = get_model_service()
+    try:
+        service = get_model_service()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
     forecast_horizon = DEFAULT_FORECAST_HORIZON
     try:
         return service.predict(forecast_horizon)
@@ -302,12 +319,29 @@ def predict() -> PredictionResponse:
 
 @app.get("/timeseries", response_model=TimeSeriesResponse)
 def get_timeseries(hours: int = Query(96, ge=1)) -> TimeSeriesResponse:
-    service = get_model_service()
     clamped_hours = min(hours, MAX_HOURLY_FILES)
     try:
-        points = service.get_recent_prices(clamped_hours)
+        client = get_market_client()
+        df = client.fetch_recent_hours(clamped_hours + 48)
+        df = df.sort_values("timestamp").drop_duplicates(
+            subset=["timestamp"], keep="last"
+        )
+        df = df.tail(clamped_hours)
+        if df.empty:
+            raise ValueError("指定された時間範囲に価格データが存在しません")
+        if "usd_price" not in df.columns:
+            raise ValueError("取得したデータに usd_price 列が存在しません")
+        points = [
+            PricePoint(
+                timestamp=pd.to_datetime(row["timestamp"], utc=True).isoformat(),
+                price=float(row["usd_price"]),
+            )
+            for _, row in df.iterrows()
+        ]
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

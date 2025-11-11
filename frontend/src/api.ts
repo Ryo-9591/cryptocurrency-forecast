@@ -19,8 +19,37 @@ export type TimeSeriesResponse = {
   points: PricePoint[];
 };
 
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+function normalizeOrigin(url: URL) {
+  return url.origin.replace(/\/$/, "");
+}
+
+function shouldTreatAsDockerHostname(hostname: string, currentHost: string): boolean {
+  if (hostname === currentHost) {
+    return false;
+  }
+  if (!hostname.includes(".")) {
+    return true;
+  }
+  return false;
+}
+
+const API_BASE_URL = (() => {
+  const fromEnvRaw = (import.meta.env.VITE_API_BASE_URL ?? "").trim();
+  if (fromEnvRaw) {
+    try {
+      const envUrl = new URL(fromEnvRaw, window.location.origin);
+      if (!shouldTreatAsDockerHostname(envUrl.hostname, window.location.hostname)) {
+        return normalizeOrigin(envUrl);
+      }
+    } catch (error) {
+      console.warn("VITE_API_BASE_URL が無効なため、クライアントホストにフォールバックします:", error);
+    }
+  }
+
+  const { protocol, hostname } = window.location;
+  const defaultPort = "8000";
+  return `${protocol}//${hostname}:${defaultPort}`;
+})();
 
 async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
