@@ -1,14 +1,15 @@
-# CoinGecko BTC価格データ取得・S3アップロードパイプライン
+# BTC価格予測システム
 
-CoinGecko APIからBTC（ビットコイン）の価格情報を取得し、Amazon S3にアップロードするAirflow DAGです。
+CoinGecko APIからBTC価格情報を取得し、機械学習モデルで予測を行うシステムです。
 
 ## 機能
 
-- CoinGecko APIからBTC価格情報を取得（USD、EUR、JPY）
-- データをCSVとParquet形式に変換
-- Amazon S3に自動アップロード
-- 定期実行（デフォルト: 毎日）
-- FastAPIによる推論エンドポイントとReact UIでのBTC価格可視化・予測実行
+- CoinGecko APIからBTC価格情報を取得（USD）
+- データをParquet形式でAmazon S3に自動保存
+- 機械学習モデル（XGBoost、LightGBM）による価格予測
+- MLflowによるモデル管理と追跡
+- FastAPIによる推論エンドポイント
+- React UIでのBTC価格可視化・予測実行
 
 ## 前提条件
 
@@ -20,26 +21,22 @@ CoinGecko APIからBTC（ビットコイン）の価格情報を取得し、Amaz
 
 ### 1. 環境変数の設定
 
-`.env.example`をコピーして`.env`ファイルを作成し、必要な値を設定してください：
+`env.example`をコピーして`.env`ファイルを作成し、必要な値を設定してください：
 
 ```bash
-cp .env.example .env
+cp env.example .env
 ```
 
-`.env`ファイルを編集して、以下の値を設定：
-
+必須の環境変数：
 - `AWS_ACCESS_KEY_ID`: AWSアクセスキーID
 - `AWS_SECRET_ACCESS_KEY`: AWSシークレットアクセスキー
 - `AWS_DEFAULT_REGION`: AWSリージョン（例: ap-northeast-1）
 - `S3_BUCKET_NAME`: S3バケット名
-- `COINGECKO_API_KEY`: CoinGecko APIキー（オプション、無料プランでも使用可能）
-- `COINGECKO_API_BASE`: CoinGecko APIのベースURL（デフォルト: `https://api.coingecko.com/api/v3`）
-- `COINGECKO_COIN_ID`: 取得対象のコインID（デフォルト: `bitcoin`）
-- `COINGECKO_VS_CURRENCY`: 価格を取得する通貨（デフォルト: `usd`）
-- `_AIRFLOW_WWW_USER_USERNAME`: Airflow Web UIのユーザー名（デフォルト: `airflow`）
-- `_AIRFLOW_WWW_USER_PASSWORD`: Airflow Web UIのパスワード（デフォルト: `airflow`）
+- `COINGECKO_API_KEY`: CoinGecko APIキー（必須）
 
-### 2. Airflow・API・UIの起動
+その他の環境変数は`env.example`を参照してください。
+
+### 2. サービスの起動
 
 ```bash
 # Airflow UIDを設定（Linux/Macの場合）
@@ -57,104 +54,32 @@ docker-compose up -d
 
 ### 3. 各サービスへのアクセス
 
-- Airflow Web UI: http://localhost:8080
-  - ユーザー名: `.env`ファイルの`_AIRFLOW_WWW_USER_USERNAME`（デフォルト: `airflow`）
-  - パスワード: `.env`ファイルの`_AIRFLOW_WWW_USER_PASSWORD`（デフォルト: `airflow`）
-- BTC予測UI（React）: http://localhost:8081
-  - FastAPIエンドポイント `http://localhost:8000` に接続して最新データと予測を取得します。
-
-**注意**: 初回起動時は、ログに自動生成されたパスワードが表示される場合があります。環境変数で設定した値を使用してください。
-
-### 4. Airflow Web UIへのアクセス詳細
-
-ブラウザで上記URLにアクセスし、`.env`で指定した認証情報を使用してログインしてください。
-
-### 5. AWS接続の設定
-
-Airflow Web UIでAWS接続を設定：
-
-1. **Admin** → **Connections** に移動
-2. **+** ボタンをクリックして新しい接続を追加
-3. 以下の情報を入力：
-   - **Connection Id**: `aws_default`
-   - **Connection Type**: `Amazon Web Services`
-   - **Login**: AWSアクセスキーID
-   - **Password**: AWSシークレットアクセスキー
-   - **Extra**: `{"region_name": "ap-northeast-1"}`（リージョンを変更する場合）
-
-または、環境変数で設定している場合は、接続設定は不要です。
-
-## Reactフロントエンドでの予測ワークフロー
-
-1. `http://localhost:8081` にアクセスし、最新のBTC価格チャートを確認します。
-2. 「予測を実行」ボタンをクリックするとFastAPIの`/predict`エンドポイントにリクエストが送信され、チャートに予測ラインが追加されます。
-3. プルダウンで表示期間（24/48/72/96時間）を切り替え、必要に応じて再度予測を実行してください。
-4. 予測が失敗した場合は画面にエラーが表示されるため、FastAPIログを確認してください。
-
-`VITE_API_BASE_URL`を変更すると、UIが接続するAPIエンドポイントを切り替えられます（Dockerビルド時に反映、ローカル環境では `http://localhost:8000` を推奨）。
-FastAPIの`/timeseries`エンドポイントは、CoinGeckoの`/market_chart/range` APIから最新価格を直接取得し、チャートに即時反映します。APIキーを設定すると有料プランのレート制限に対応できます。
+- **Airflow Web UI**: http://localhost:8080（デフォルト: `airflow`/`airflow`）
+- **MLflow UI**: http://localhost:5000
+- **FastAPI**: http://localhost:8000（APIドキュメント: http://localhost:8000/docs）
+- **BTC予測UI**: http://localhost:8081
 
 ## DAGの実行
 
-1. Airflow Web UIで `coin_gecko_btc_to_s3` DAGを有効化
-2. 手動実行する場合は、DAGを選択して「Trigger DAG」をクリック
-3. 定期実行はデフォルトで毎日実行されます（`schedule_interval='@daily'`）
+システムには2つの主要なDAGが含まれています：
+
+1. **`fetch_daily_data`**: CoinGeckoからBTC価格データを取得し、S3に保存（毎日午前1時実行）
+2. **`btc_price_regression`**: S3からデータを読み込み、機械学習モデルを訓練（毎日午前3時実行）
+
+Airflow Web UIで各DAGを有効化し、手動実行する場合は「Trigger DAG」をクリックしてください。
 
 ## データ形式
 
-### 取得されるデータ
-
-- `timestamp`: データ取得時刻
-- `last_updated`: CoinGecko APIの最終更新時刻
-- `usd_price`: USD価格
-- `eur_price`: EUR価格
-- `jpy_price`: JPY価格
-- `usd_market_cap`: USD時価総額
-- `usd_24h_vol`: 24時間取引量（USD）
-- `usd_24h_change`: 24時間価格変動率（%）
-
-### S3保存形式
-
-データは以下のパスに保存されます：
-
-```
-s3://<bucket-name>/btc-prices/<YYYY-MM-DD>/btc_price_<timestamp>.csv
-s3://<bucket-name>/btc-prices/<YYYY-MM-DD>/btc_price_<timestamp>.parquet
-```
-
-## スケジュール変更
-
-DAGの実行頻度を変更する場合は、`dags/coin_gecko_btc_to_s3.py`の`schedule_interval`を編集：
-
-```python
-# 毎時間実行
-schedule_interval='@hourly'
-
-# 毎週実行
-schedule_interval='@weekly'
-
-# Cron形式（例: 毎日午前9時）
-schedule_interval='0 9 * * *'
-```
+データは以下のパスに単一のParquetファイルとして保存されます：
+- `s3://<bucket-name>/btc-prices/daily/btc_prices.parquet`
+- `s3://<bucket-name>/mlflow-artifacts/`（MLflowアーティファクト）
 
 ## トラブルシューティング
 
-### DAGが表示されない
-
-- `dags/`ディレクトリにファイルが正しく配置されているか確認
-- Airflowのログを確認: `docker-compose logs airflow-scheduler`
-
-### S3アップロードエラー
-
-- AWS認証情報が正しく設定されているか確認
-- S3バケットが存在し、適切な権限が設定されているか確認
-- IAMポリシーでS3への書き込み権限があるか確認
-
-### APIリクエストエラー
-
-- CoinGecko APIのレート制限に達していないか確認
-- インターネット接続を確認
-- APIキーが正しく設定されているか確認（オプション）
+- **DAGが表示されない**: `docker-compose logs airflow-scheduler`でログを確認
+- **S3アップロードエラー**: AWS認証情報とS3バケットの権限を確認
+- **APIリクエストエラー**: CoinGecko APIキーとレート制限を確認
+- **モデル予測エラー**: MLflowサーバーの起動状態とProductionステージのモデル存在を確認
 
 ## 停止とクリーンアップ
 
@@ -162,11 +87,10 @@ schedule_interval='0 9 * * *'
 # サービスを停止
 docker-compose down
 
-# データベースも含めて完全に削除
+# データベースも含めて完全に削除（注意: データが失われます）
 docker-compose down -v
 ```
 
 ## ライセンス
 
 このプロジェクトはMITライセンスの下で公開されています。
-
