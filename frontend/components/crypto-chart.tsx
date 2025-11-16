@@ -52,6 +52,9 @@ export function CryptoChart() {
           getPredictSeries(hours).catch(() => null), // 予測データは失敗しても続行
         ])
 
+        // 予測データのbase_timestampを取得（予測が実行された時刻）
+        const predictionBaseTimestamp = predictData ? new Date(predictData.base_timestamp).getTime() : null
+
         // 時系列データをチャート形式に変換
         const priceMap = new Map<string, number>()
         timeSeriesData.points.forEach((point) => {
@@ -60,13 +63,17 @@ export function CryptoChart() {
           priceMap.set(timeKey, point.price)
         })
 
-        // 予測データをマップに追加
+        // 予測データをマップに追加（base_timestamp以降のデータのみ）
         const predictionMap = new Map<string, number>()
-        if (predictData) {
+        if (predictData && predictionBaseTimestamp !== null) {
           predictData.points.forEach((point) => {
-            const date = new Date(point.timestamp)
-            const timeKey = format(date, 'HH:mm')
-            predictionMap.set(timeKey, point.price)
+            const pointTimestamp = new Date(point.timestamp).getTime()
+            // base_timestamp以降のデータのみを追加
+            if (pointTimestamp >= predictionBaseTimestamp) {
+              const date = new Date(point.timestamp)
+              const timeKey = format(date, 'HH:mm')
+              predictionMap.set(timeKey, point.price)
+            }
           })
         }
 
@@ -165,14 +172,18 @@ export function CryptoChart() {
             }}
           >
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData}>
+              <LineChart 
+                data={chartData}
+                margin={{ top: 5, right: 10, left: 10, bottom: 40 }}
+              >
                 <XAxis
                   dataKey="time"
                   stroke="oklch(0.65 0.01 264)"
-                  fontSize={12}
+                  fontSize={11}
                   tickLine={false}
                   axisLine={false}
                   interval="preserveStartEnd"
+                  tickMargin={8}
                 />
                 <YAxis
                   stroke="oklch(0.65 0.01 264)"

@@ -14,13 +14,12 @@ export function Header() {
             <TrendingUp className="size-6 text-primary-foreground" />
           </div>
           <div>
-            <h1 className="text-xl font-bold text-foreground">Bitcoin Predictor</h1>
-            <p className="text-xs text-muted-foreground">BTC AI予想分析プラットフォーム</p>
+            <h1 className="text-xl font-bold text-foreground">cryptocurrency forecast</h1>
           </div>
         </div>
         <div className="flex items-center gap-4">
           <div className="hidden md:block text-right">
-            <p className="text-sm font-medium text-foreground">BTC予想精度</p>
+            <p className="text-sm font-medium text-foreground">予想精度</p>
             <p className="text-lg font-bold text-primary">
               {averageAccuracy !== null ? `${averageAccuracy.toFixed(1)}%` : '計算中...'}
             </p>
