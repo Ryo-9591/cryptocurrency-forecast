@@ -18,17 +18,14 @@ from io import BytesIO
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+from sklearn.model_selection import train_test_split
+from mlflow.tracking import MlflowClient
 
 # utilsモジュールをインポート
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.feature_engineering import create_all_features, prepare_features_for_training
 from utils.models import ModelTrainer
 
-# sklearnのインポート
-try:
-    from sklearn.model_selection import train_test_split
-except ImportError:
-    raise ImportError("scikit-learn is required for model training")
 
 # タイムゾーン設定（東京時間）
 JST = pytz.timezone("Asia/Tokyo")
@@ -37,6 +34,10 @@ JST = pytz.timezone("Asia/Tokyo")
 TRAINING_DATA_S3_KEY = os.getenv(
     "TRAINING_DATA_S3_KEY",
     "btc-prices/ml/training_data/training_data.parquet",
+)
+# 学習データの読込元（fetch_daily_dataで集約した単一Parquet）
+DAILY_PARQUET_KEY = os.getenv(
+    "DAILY_PARQUET_KEY", "btc-prices/daily/btc_prices.parquet"
 )
 
 # 予測する時間先（時間単位）
@@ -83,13 +84,6 @@ def _ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
 
 def _promote_latest_mlflow_model(model_name: str, stage: str) -> Optional[str]:
     try:
-        import mlflow
-        from mlflow.tracking import MlflowClient
-    except ImportError:
-        print("MLflowライブラリが見つからないためモデル昇格をスキップします")
-        return None
-
-    try:
         client = MlflowClient()
         versions = client.search_model_versions(f"name='{model_name}'")
         if not versions:
@@ -114,7 +108,7 @@ def _promote_latest_mlflow_model(model_name: str, stage: str) -> Optional[str]:
 
 def load_data_from_s3(**context) -> dict:
     """
-    S3からBTC価格データ（hourly配下全件）を読み込む
+    S3からBTC価格データ（単一Parquet）を読み込む
 
     Returns:
         dict: データフレーム（base64エンコード）とメタデータを含む辞書
@@ -125,33 +119,20 @@ def load_data_from_s3(**context) -> dict:
 
     s3_hook = S3Hook(aws_conn_id="aws_default")
 
-    prefix = "btc-prices/hourly/"
-    print(f"S3から学習データを取得: s3://{bucket_name}/{prefix} 以下の全Parquet")
+    key = DAILY_PARQUET_KEY
+    print(f"S3から学習データを取得: s3://{bucket_name}/{key}")
 
-    try:
-        files = s3_hook.list_keys(bucket_name=bucket_name, prefix=prefix) or []
-    except Exception as e:
-        raise ValueError(f"S3キー一覧の取得に失敗しました: {e}") from e
-
-    dataframes: list[pd.DataFrame] = []
-
-    for file_key in files:
-        if not file_key.endswith(".parquet"):
-            continue
-        try:
-            file_obj = s3_hook.get_key(key=file_key, bucket_name=bucket_name)
-            parquet_data = file_obj.get()["Body"].read()
-            df = pd.read_parquet(BytesIO(parquet_data))
-            df = _ensure_timestamp_column(df)
-            dataframes.append(df)
-        except Exception as e:
-            print(f"  ファイル処理エラー ({file_key}): {e}")
-            continue
-
-    if not dataframes:
+    if not s3_hook.check_for_key(key=key, bucket_name=bucket_name):
         raise ValueError("S3から学習用データを取得できませんでした")
 
-    consolidated_df = pd.concat(dataframes, ignore_index=True)
+    try:
+        file_obj = s3_hook.get_key(key=key, bucket_name=bucket_name)
+        parquet_data = file_obj.get()["Body"].read()
+        consolidated_df = pd.read_parquet(BytesIO(parquet_data))
+    except Exception as e:
+        raise ValueError(f"学習データParquetの読み込みに失敗しました: {e}") from e
+
+    consolidated_df = _ensure_timestamp_column(consolidated_df)
     consolidated_df["timestamp"] = pd.to_datetime(
         consolidated_df["timestamp"], utc=True
     )
@@ -246,7 +227,9 @@ def train_models(**context) -> dict:
     )
 
     time_columns = {"timestamp", "timestamp_jst", "retrieved_at"}
-    X = X.drop(columns=[col for col in time_columns if col in X.columns], errors="ignore")
+    X = X.drop(
+        columns=[col for col in time_columns if col in X.columns], errors="ignore"
+    )
 
     X = X.replace([pd.NA, float("inf"), float("-inf")], pd.NA)
     y = y.replace([pd.NA, float("inf"), float("-inf")], pd.NA)
@@ -294,7 +277,7 @@ def train_models(**context) -> dict:
 
         with mlflow.start_run(
             run_name=f"training_{datetime.now(JST).strftime('%Y%m%d_%H%M%S')}"
-        ):
+        ) as active_run:
             mlflow.log_params(
                 {
                     "train_samples": len(X_train),
@@ -310,21 +293,50 @@ def train_models(**context) -> dict:
                 y_val,
             )
 
-            # 最良のモデルをModel Registryに登録
+            # モデルをModel Registryに登録（最新モデルを昇格対象にする）
             try:
                 model_uri = trainer.register_best_model_to_mlflow()
                 if model_uri:
                     mlflow.log_param("registered_model_uri", model_uri)
+
+                if AUTO_PROMOTE_MLFLOW_MODEL:
+                    client = MlflowClient()
+                    model_name_env = os.getenv(
+                        "MLFLOW_MODEL_NAME", "btc-price-prediction"
+                    )
+                    # 現在のrun_idに紐づくモデルバージョンを特定して昇格
+                    run_id = active_run.info.run_id
+                    versions = client.search_model_versions(f"name='{model_name_env}'")
+                    current_run_versions = [
+                        v for v in versions if getattr(v, "run_id", None) == run_id
+                    ]
+                    target_version = None
+                    if current_run_versions:
+                        # 念のため作成時刻で最新を選択
+                        target_version = max(
+                            current_run_versions, key=lambda v: v.creation_timestamp
+                        )
+                    else:
+                        # フォールバック: 全体の最新を昇格
+                        target_version = (
+                            max(versions, key=lambda v: v.creation_timestamp)
+                            if versions
+                            else None
+                        )
+
+                    if target_version:
+                        client.transition_model_version_stage(
+                            name=model_name_env,
+                            version=target_version.version,
+                            stage=TARGET_MLFLOW_STAGE,
+                            archive_existing_versions=True,
+                        )
+                        promoted_model_version = target_version.version
+                        print(
+                            f"最新モデルを昇格しました: {model_name_env} version {promoted_model_version} -> {TARGET_MLFLOW_STAGE}"
+                        )
             except Exception as e:
-                print(f"Model registration error: {e}")
-        if AUTO_PROMOTE_MLFLOW_MODEL:
-            try:
-                promoted_model_version = _promote_latest_mlflow_model(
-                    model_name=os.getenv("MLFLOW_MODEL_NAME", "btc-price-prediction"),
-                    stage=TARGET_MLFLOW_STAGE,
-                )
-            except Exception as e:  # noqa: BLE001
-                print(f"モデル昇格処理の例外（無視）: {e}")
+                print(f"Model registration/promotion error (ignored): {e}")
 
     else:
         trainer.train_xgboost_model(X_train, y_train, X_val, y_val)

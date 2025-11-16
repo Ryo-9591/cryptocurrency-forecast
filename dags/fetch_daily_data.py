@@ -191,7 +191,7 @@ def sync_daily_data(**context) -> dict:
     )
 
     # 直近365日のみ保持（ファイル肥大化防止）
-    cutoff_ts = pd.Timestamp.utcnow().tz_localize("UTC") - pd.Timedelta(days=365)
+    cutoff_ts = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=365)
     combined = combined[combined["timestamp"] >= cutoff_ts]
 
     # S3へ単一ファイルとしてアップロード（上書き）
@@ -227,7 +227,7 @@ dag = DAG(
     description="CoinGeckoからBTCデータを取得し、日次でS3へ保存",
     schedule_interval="0 1 * * *",
     start_date=datetime(2024, 1, 1, tzinfo=JST),
-    catchup=True,
+    catchup=False,
     tags=["cryptocurrency", "coingecko", "s3", "daily"],
 )
 
