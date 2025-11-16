@@ -6,9 +6,11 @@ from typing import Optional
 import mlflow
 import pandas as pd
 import requests
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import asyncio
+import json
 
 from utils.feature_engineering import (
     create_all_features,
@@ -127,8 +129,18 @@ class CoinGeckoClient:
 
         try:
             response = self.session.get(url, params=params, timeout=15)
+            if response.status_code == 429:
+                raise RuntimeError(
+                    "CoinGecko APIのレート制限に達しました。しばらく待ってから再度お試しください。"
+                    "APIキーを設定することで制限を緩和できます。"
+                )
             response.raise_for_status()
         except requests.RequestException as exc:
+            if hasattr(exc.response, 'status_code') and exc.response.status_code == 429:
+                raise RuntimeError(
+                    "CoinGecko APIのレート制限に達しました。しばらく待ってから再度お試しください。"
+                    "APIキーを設定することで制限を緩和できます。"
+                ) from exc
             raise RuntimeError(f"CoinGecko APIリクエストに失敗しました: {exc}") from exc
 
         payload = response.json()
@@ -696,3 +708,81 @@ def predict_series(hours: int = Query(1, ge=1, le=168)) -> ForecastSeriesRespons
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# WebSocket接続を管理するためのセット
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def send_personal_message(self, message: dict, websocket: WebSocket):
+        try:
+            await websocket.send_json(message)
+        except Exception:
+            pass
+
+    async def broadcast(self, message: dict):
+        disconnected = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                disconnected.append(connection)
+        
+        # 切断された接続を削除
+        for connection in disconnected:
+            self.disconnect(connection)
+
+
+manager = ConnectionManager()
+
+
+@app.websocket("/ws/price")
+async def websocket_price(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        # 初回接続時に現在の価格を送信
+        client = get_market_client()
+        df = client.fetch_last_week()
+        if not df.empty and "usd_price" in df.columns:
+            latest_price = float(df["usd_price"].iloc[-1])
+            await manager.send_personal_message({
+                "type": "price_update",
+                "data": {
+                    "price": latest_price,
+                    "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                }
+            }, websocket)
+        
+        # 1分ごとに価格を更新（レート制限を考慮）
+        while True:
+            await asyncio.sleep(60)
+            try:
+                client = get_market_client()
+                df = client.fetch_last_week()
+                if not df.empty and "usd_price" in df.columns:
+                    latest_price = float(df["usd_price"].iloc[-1])
+                    await manager.send_personal_message({
+                        "type": "price_update",
+                        "data": {
+                            "price": latest_price,
+                            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                        }
+                    }, websocket)
+            except Exception as e:
+                await manager.send_personal_message({
+                    "type": "error",
+                    "data": {"message": str(e)}
+                }, websocket)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        manager.disconnect(websocket)
+        print(f"WebSocketエラー: {e}")
