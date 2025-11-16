@@ -1,23 +1,55 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-ARG VITE_API_BASE_URL=http://localhost:8000
-ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+ARG NEXT_PUBLIC_DEV_MODE=true
+ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
+ENV NEXT_PUBLIC_DEV_MODE=${NEXT_PUBLIC_DEV_MODE}
 
+# package.jsonとロックファイルをコピー
 COPY frontend/package*.json ./
-RUN npm install
+COPY frontend/pnpm-lock.yaml* ./
 
-COPY frontend/tsconfig.json frontend/tsconfig.node.json frontend/vite.config.ts frontend/index.html ./
-COPY frontend/public ./public
-COPY frontend/src ./src
+# pnpmをインストールして依存関係をインストール
+RUN corepack enable && corepack prepare pnpm@latest --activate
+# ロックファイルが不完全な場合は通常のinstallを使用
+RUN pnpm install
 
-RUN npm run build
+# プロジェクトファイルをコピー
+COPY frontend/next.config.mjs ./
+COPY frontend/tsconfig.json ./
+COPY frontend/postcss.config.mjs ./
+COPY frontend/components.json ./
+COPY frontend/app ./app
+COPY frontend/components ./components
+COPY frontend/lib ./lib
+COPY frontend/hooks ./hooks
+COPY frontend/contexts ./contexts
+# publicディレクトリを作成（存在しない場合でもエラーにならないように）
+RUN mkdir -p ./public
 
-FROM nginx:1.27-alpine AS runner
-WORKDIR /usr/share/nginx/html
-COPY --from=builder /app/dist ./
+# ビルド
+RUN pnpm run build
 
-EXPOSE 80
+FROM node:20-alpine AS runner
+WORKDIR /app
 
-ENTRYPOINT ["nginx", "-g", "daemon off;"]
+ENV NODE_ENV=production
+ENV NEXT_PUBLIC_DEV_MODE=true
+
+# 必要なファイルのみをコピー
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/next.config.mjs ./
+COPY --from=builder /app/.next ./.next
+# publicディレクトリを作成（Next.jsはpublicディレクトリが存在しない場合でも動作します）
+RUN mkdir -p ./public
+COPY --from=builder /app/node_modules ./node_modules
+
+EXPOSE 3000
+
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+
+# next startを直接実行（pnpmは不要）
+CMD ["node_modules/.bin/next", "start"]
 
