@@ -1,7 +1,7 @@
 x-airflow-common: &airflow-common
   build:
     context: .
-    dockerfile: Dockerfile
+    dockerfile: Dockerfile.airflow
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
@@ -168,7 +168,8 @@ services:
 
   mlflow:
     build:
-      context: ./mlflow
+      context: .
+      dockerfile: Dockerfile.mlflow
     image: mlflow-custom:latest
     container_name: mlflow-server
     ports:
@@ -243,7 +244,7 @@ services:
       FRONTEND_CORS_ORIGINS: ${FRONTEND_CORS_ORIGINS:-http://localhost:8081,http://frontend}
       FRONTEND_CORS_REGEX: ${FRONTEND_CORS_REGEX:-https?://localhost(:\d+)?$}
     ports:
-      - "8000:8000"
+      - "8000:80"
     depends_on:
       mlflow:
         condition: service_healthy
@@ -254,8 +255,8 @@ services:
 
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: Dockerfile.frontend
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
     image: cryptocurrency-forecast-frontend:latest

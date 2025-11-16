@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
         psycopg2-binary==2.9.9 \
         boto3==1.28.57
 
-COPY entrypoint.sh /mlflow-entrypoint.sh
+COPY mlflow/entrypoint.sh /mlflow-entrypoint.sh
 RUN chmod +x /mlflow-entrypoint.sh
 
 ENTRYPOINT ["/mlflow-entrypoint.sh"]

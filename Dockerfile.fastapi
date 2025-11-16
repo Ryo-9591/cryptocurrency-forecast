@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM tiangolo/uvicorn-gunicorn-fastapi:python3.10
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -7,17 +7,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential curl && \
-    rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-COPY utils ./utils
-COPY app ./app
+# アプリコードを配置（tiangoloの既定: app.main:app を探す）
+COPY utils /app/utils
+COPY app /app/app
 
-EXPOSE 8000
-
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# ポート公開はベースイメージが処理、CMDもベースの起動設定を使用
 
