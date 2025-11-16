@@ -84,7 +84,7 @@ async function handleResponse<T>(response: Response): Promise<T> {
 }
 
 export async function fetchTimeSeries(
-  hours: number = 96
+  hours: number = 24
 ): Promise<PricePoint[]> {
   const url = new URL("/timeseries", API_BASE_URL);
   url.searchParams.set("hours", `${hours}`);
@@ -105,7 +105,7 @@ export type ForecastSeriesResponse = {
 };
 
 export async function fetchForecastSeries(
-  hours: number = 168
+  hours: number = 1
 ): Promise<ForecastSeriesResponse> {
   const url = new URL("/predict_series", API_BASE_URL);
   url.searchParams.set("hours", `${hours}`);

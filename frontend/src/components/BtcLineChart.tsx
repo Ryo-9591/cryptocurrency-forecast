@@ -32,18 +32,39 @@ function buildChartData(
   historical: PricePoint[],
   forecast?: PricePoint[] | null
 ): Array<{ 
-  timestamp: string; 
+  timestamp: number; 
+  timestampStr: string;
   actual: number | null; 
   forecast: number | null;
   forecastStart: boolean;
 }> {
-  const histSorted = [...historical].sort(
+  // 現在時刻から24時間前までの実績データを取得
+  const now = new Date();
+  const yesterdaySameTime = new Date(now);
+  yesterdaySameTime.setDate(yesterdaySameTime.getDate() - 1);
+  const yesterdaySameTimeTime = yesterdaySameTime.getTime();
+  
+  // 次の日の同じ時刻を計算（X軸の終点）
+  const tomorrowSameTime = new Date(now);
+  tomorrowSameTime.setDate(tomorrowSameTime.getDate() + 1);
+  const tomorrowSameTimeTime = tomorrowSameTime.getTime();
+  
+  // 実績データは過去24時間分のみ
+  const filteredHistorical = historical.filter(
+    (p) => {
+      const pTime = new Date(p.timestamp).getTime();
+      return pTime >= yesterdaySameTimeTime && pTime <= now.getTime();
+    }
+  );
+  
+  const histSorted = [...filteredHistorical].sort(
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
   
-  // 実績データを構築
+  // 実績データを構築（timestampを数値に変換）
   const data = histSorted.map((p) => ({
-    timestamp: p.timestamp,
+    timestamp: new Date(p.timestamp).getTime(),
+    timestampStr: p.timestamp, // ラベル表示用
     actual: p.price,
     forecast: null as number | null,
     forecastStart: false
@@ -58,7 +79,7 @@ function buildChartData(
 
     // 実績の最後の時刻と価格を取得
     const lastHist = data.length > 0 ? data[data.length - 1] : null;
-    const lastHistTs = lastHist ? new Date(lastHist.timestamp).getTime() : NaN;
+    const lastHistTs = lastHist ? lastHist.timestamp : NaN;
     const lastHistPrice = lastHist ? lastHist.actual : null;
 
     if (!isNaN(lastHistTs) && lastHistPrice !== null && futSorted.length > 0) {
@@ -80,7 +101,7 @@ function buildChartData(
         // 実績の最後の点より後の時刻の予測点を追加
         if (pTs > lastHistTs) {
           const existingIndex = data.findIndex(
-            (d) => new Date(d.timestamp).getTime() === pTs
+            (d) => d.timestamp === pTs
           );
           if (existingIndex >= 0) {
             data[existingIndex] = {
@@ -89,7 +110,8 @@ function buildChartData(
             };
           } else {
             data.push({
-              timestamp: p.timestamp,
+              timestamp: new Date(p.timestamp).getTime(),
+              timestampStr: p.timestamp, // ラベル表示用
               actual: null,
               forecast: p.price,
               forecastStart: false
@@ -101,7 +123,8 @@ function buildChartData(
       // 実績がない場合は、予測のみを表示
       for (const p of futSorted) {
         data.push({
-          timestamp: p.timestamp,
+          timestamp: new Date(p.timestamp).getTime(),
+          timestampStr: p.timestamp, // ラベル表示用
           actual: null,
           forecast: p.price,
           forecastStart: false
@@ -112,8 +135,23 @@ function buildChartData(
 
   // タイムスタンプでソート
   data.sort(
-    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    (a, b) => a.timestamp - b.timestamp
   );
+  
+  // X軸の範囲を1日分にするため、次の日の同じ時刻の点を追加（データがない場合）
+  if (data.length > 0) {
+    const lastDataTime = data[data.length - 1].timestamp;
+    if (lastDataTime < tomorrowSameTimeTime) {
+      // 次の日の同じ時刻の点を追加（予測がない場合でもX軸の範囲を確保）
+      data.push({
+        timestamp: tomorrowSameTimeTime,
+        timestampStr: tomorrowSameTime.toISOString(), // ラベル表示用
+        actual: null,
+        forecast: null,
+        forecastStart: false
+      });
+    }
+  }
   
   return data;
 }
@@ -205,8 +243,21 @@ export default function BtcLineChart({ historical, forecast }: Props) {
           <CartesianGrid stroke="#e2e8f0" strokeDasharray="4 8" />
           <XAxis
             dataKey="timestamp"
-            tickFormatter={toLocalLabel}
-            minTickGap={forecast && forecast.length > 0 ? 24 : 12}
+            tickFormatter={(value) => {
+              const date = new Date(value);
+              return toLocalLabel(date.toISOString());
+            }}
+            type="number"
+            scale="time"
+            domain={(() => {
+              const now = new Date();
+              const yesterdaySameTime = new Date(now);
+              yesterdaySameTime.setDate(yesterdaySameTime.getDate() - 1);
+              const tomorrowSameTime = new Date(now);
+              tomorrowSameTime.setDate(tomorrowSameTime.getDate() + 1);
+              return [yesterdaySameTime.getTime(), tomorrowSameTime.getTime()];
+            })()}
+            tick={{ fill: "#64748b", fontSize: 12 }}
             stroke="#64748b"
             angle={-45}
             textAnchor="end"

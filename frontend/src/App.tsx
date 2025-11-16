@@ -27,7 +27,8 @@ export default function App() {
     (async () => {
       try {
         setLoadingInitial(true);
-        const points = await fetchTimeSeries();
+        // 過去24時間分のデータを取得（次の日の同じ時刻まで表示するため）
+        const points = await fetchTimeSeries(24);
         setHistorical(points);
         setError(null);
       } catch (err) {
@@ -55,10 +56,26 @@ export default function App() {
   const handlePredict = async () => {
     try {
       setLoadingPrediction(true);
-      // 7日先まで（168時間）の予測系列を取得
-      const seriesResponse = await fetchForecastSeries(168);
+      // 次の日の同じ時刻（24時間後）の予測を取得
+      const seriesResponse = await fetchForecastSeries(24);
       const forecastPoints = seriesResponse.points || [];
-      setForecast(forecastPoints);
+      // 次の日の同じ時刻の1点だけを取得
+      if (forecastPoints.length > 0) {
+        const now = new Date();
+        const tomorrowSameTime = new Date(now);
+        tomorrowSameTime.setDate(tomorrowSameTime.getDate() + 1);
+        // 次の日の同じ時刻に最も近い予測点を1つだけ選択
+        const targetPoint = forecastPoints.find(
+          (p) => {
+            const pTime = new Date(p.timestamp);
+            const diffHours = Math.abs((pTime.getTime() - tomorrowSameTime.getTime()) / (1000 * 60 * 60));
+            return diffHours < 1; // 1時間以内の点を選択
+          }
+        ) || forecastPoints[forecastPoints.length - 1]; // 見つからない場合は最後の点
+        setForecast([targetPoint]);
+      } else {
+        setForecast([]);
+      }
       
       // 予測結果から評価情報を設定
       if (forecastPoints.length > 0) {
@@ -99,7 +116,7 @@ export default function App() {
         </p>
       </header>
 
-      <div className="card">
+      <div className="card" style={{ marginTop: "32px" }}>
         <BtcLineChart historical={historical} forecast={forecast || []} />
 
         {showEvaluation && prediction && (

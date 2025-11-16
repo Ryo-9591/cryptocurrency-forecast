@@ -476,13 +476,17 @@ class ModelService:
                 "total_expected_features": total,
             }
 
-        # 予測系列を生成
+        # 予測系列を生成（時系列予測：前の予測結果を次の予測に反映）
         out: list[PricePoint] = []
+        # 予測結果を時系列データに追加するための一時的なDataFrame
+        extended_df = features_df.copy()
+
         for h in range(1, hours + 1):
+            # 現在の時点での特徴量を準備
             X, y = prepare_features_for_training(
-                features_df,
+                extended_df,
                 target_col="usd_price",
-                forecast_horizon=h,
+                forecast_horizon=1,  # 常に1ステップ先を予測
                 drop_na=False,
             )
             X = X.drop(columns=[col for col in TIME_COLUMNS if col in X.columns])
@@ -494,9 +498,8 @@ class ModelService:
             if X.empty:
                 continue
 
-            # 最新のインデックスを使用（base_timestampと同じ時点）
-            # features_dfの最新インデックスを使用
-            latest_idx = latest_index
+            # 最新のインデックスを使用
+            latest_idx = extended_df.index[-1]
             if latest_idx in X.index:
                 X_latest = X.loc[[latest_idx]].copy()
             else:
@@ -509,7 +512,6 @@ class ModelService:
                 X_latest = X_latest.reindex(
                     columns=self.expected_feature_names, fill_value=0
                 )
-            # expected_feature_namesが取得できない場合は、そのまま予測を試みる
 
             # タイムスタンプはbase_timestampからh時間後
             target_timestamp = base_timestamp + timedelta(hours=h)
@@ -535,7 +537,25 @@ class ModelService:
                         f"予測に失敗しました: {pred_exc}. "
                         f"特徴量数: {len(X_latest.columns)}"
                     ) from pred_exc
+
             out.append(PricePoint(timestamp=target_timestamp.isoformat(), price=pred))
+
+            # 予測結果を時系列データに追加（次の予測のために）
+            # 新しい行を作成
+            new_row = extended_df.iloc[[-1]].copy()
+            new_row.index = [len(extended_df)]  # 新しいインデックス
+            new_row["timestamp"] = target_timestamp
+            new_row["usd_price"] = pred  # 予測値を設定
+
+            # 時系列データに追加
+            extended_df = pd.concat([extended_df, new_row], ignore_index=False)
+
+            # 特徴量を再計算（次の予測のために）
+            # 最後の数行だけ再計算すれば効率的だが、簡易的に全体を再計算
+            if h < hours:  # 最後の予測の後は再計算不要
+                extended_df = create_all_features(
+                    extended_df, target_col="usd_price", timestamp_col="timestamp"
+                )
 
         if not out:
             raise ValueError("予測系列を生成できませんでした")
@@ -654,7 +674,7 @@ def get_timeseries(hours: int = Query(96, ge=1)) -> TimeSeriesResponse:
 
 
 @app.get("/predict_series", response_model=ForecastSeriesResponse)
-def predict_series(hours: int = Query(168, ge=1, le=168)) -> ForecastSeriesResponse:
+def predict_series(hours: int = Query(1, ge=1, le=168)) -> ForecastSeriesResponse:
     try:
         service = get_model_service()
         points, base_timestamp, eval_info = service.predict_series(hours)
