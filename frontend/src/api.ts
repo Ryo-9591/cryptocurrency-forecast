@@ -13,6 +13,18 @@ export type PredictionResponse = {
   predicted_price: number;
   prediction_error?: number | null;
   prediction_error_pct?: number | null;
+  feature_alignment_ratio?: number | null;
+  num_zero_filled_features?: number | null;
+  total_expected_features?: number | null;
+};
+
+export type ModelEvaluationMetrics = {
+  train_rmse?: number | null;
+  train_mae?: number | null;
+  train_r2?: number | null;
+  val_rmse?: number | null;
+  val_mae?: number | null;
+  val_r2?: number | null;
 };
 
 export type TimeSeriesResponse = {
@@ -81,12 +93,29 @@ export async function fetchTimeSeries(
   return body.points;
 }
 
-export async function requestPrediction(): Promise<PredictionResponse> {
-  const url = new URL("/predict", API_BASE_URL);
-  const response = await fetch(url.toString(), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" }
-  });
-  return handleResponse<PredictionResponse>(response);
+export type ForecastSeriesResponse = {
+  model_name: string;
+  model_version?: string | null;
+  forecast_horizon_hours: number;
+  base_timestamp: string;
+  points: PricePoint[];
+  feature_alignment_ratio?: number | null;
+  num_zero_filled_features?: number | null;
+  total_expected_features?: number | null;
+};
+
+export async function fetchForecastSeries(
+  hours: number = 168
+): Promise<ForecastSeriesResponse> {
+  const url = new URL("/predict_series", API_BASE_URL);
+  url.searchParams.set("hours", `${hours}`);
+  const response = await fetch(url.toString());
+  return handleResponse<ForecastSeriesResponse>(response);
+}
+
+export async function fetchModelEvaluation(): Promise<ModelEvaluationMetrics> {
+  const url = new URL("/model/evaluation", API_BASE_URL);
+  const response = await fetch(url.toString());
+  return handleResponse<ModelEvaluationMetrics>(response);
 }
 

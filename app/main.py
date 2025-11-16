@@ -12,27 +12,13 @@ from pydantic import BaseModel
 
 from utils.feature_engineering import create_all_features, prepare_features_for_training
 
-UTC = timezone.utc
-JST = timezone(timedelta(hours=9))
-
 TIME_COLUMNS = {"timestamp", "timestamp_jst", "retrieved_at"}
 
 DEFAULT_FORECAST_HORIZON = int(os.getenv("FORECAST_HORIZON_HOURS", "4"))
-MAX_HOURLY_FILES = int(os.getenv("FASTAPI_MAX_HOURLY_FILES", "96"))
 COINGECKO_API_BASE = os.getenv("COINGECKO_API_BASE", "https://api.coingecko.com/api/v3")
 COINGECKO_COIN_ID = os.getenv("COINGECKO_COIN_ID", "bitcoin")
 COINGECKO_VS_CURRENCY = os.getenv("COINGECKO_VS_CURRENCY", "usd")
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
-
-
-def _ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
-    candidates = ["timestamp", "datetime", "date", "time", "ts"]
-    for column in df.columns:
-        if column.lower() in candidates:
-            out = df.copy()
-            out["timestamp"] = pd.to_datetime(out[column], utc=True, errors="coerce")
-            return out
-    raise KeyError("timestamp")
 
 
 class PredictionResponse(BaseModel):
@@ -45,6 +31,10 @@ class PredictionResponse(BaseModel):
     predicted_price: float
     prediction_error: Optional[float] = None
     prediction_error_pct: Optional[float] = None
+    # デバッグ用（任意）
+    feature_alignment_ratio: Optional[float] = None
+    num_zero_filled_features: Optional[int] = None
+    total_expected_features: Optional[int] = None
 
 
 class HealthResponse(BaseModel):
@@ -60,6 +50,26 @@ class PricePoint(BaseModel):
 
 class TimeSeriesResponse(BaseModel):
     points: list[PricePoint]
+
+
+class ForecastSeriesResponse(BaseModel):
+    model_name: str
+    model_version: Optional[str] = None
+    forecast_horizon_hours: int
+    base_timestamp: str
+    points: list[PricePoint]
+    feature_alignment_ratio: Optional[float] = None
+    num_zero_filled_features: Optional[int] = None
+    total_expected_features: Optional[int] = None
+
+
+class ModelEvaluationMetrics(BaseModel):
+    train_rmse: Optional[float] = None
+    train_mae: Optional[float] = None
+    train_r2: Optional[float] = None
+    val_rmse: Optional[float] = None
+    val_mae: Optional[float] = None
+    val_r2: Optional[float] = None
 
 
 def _parse_cors_origins() -> list[str]:
@@ -99,9 +109,9 @@ class CoinGeckoClient:
         if api_key:
             self.session.headers["x-cg-pro-api-key"] = api_key
 
-    def fetch_recent_hours(self, hours: int) -> pd.DataFrame:
-        end = datetime.now(tz=UTC)
-        start = end - timedelta(hours=hours)
+    def fetch_last_week(self) -> pd.DataFrame:
+        end = datetime.now(tz=timezone.utc)
+        start = end - timedelta(days=7)
         return self._fetch_range(start, end)
 
     def _fetch_range(self, start: datetime, end: datetime) -> pd.DataFrame:
@@ -162,10 +172,12 @@ class ModelService:
         mlflow.set_tracking_uri(self.mlflow_tracking_uri)
         self.model_uri = f"models:/{self.model_name}/{self.model_stage}"
 
-        try:
-            self.model = mlflow.pyfunc.load_model(self.model_uri)
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"MLflowモデルの読み込みに失敗しました: {exc}") from exc
+        # モデル読み込み
+        self.model = self._load_mlflow_model(self.model_uri)
+        # 期待する特徴量名を推定
+        self.expected_feature_names: list[str] | None = self._infer_expected_features(
+            self.model
+        )
 
         self.model_version = None
         try:
@@ -179,9 +191,76 @@ class ModelService:
             # バージョン情報が取得できなくても推論は継続できる
             self.model_version = None
 
+    def _load_mlflow_model(self, uri: str):
+        try:
+            return mlflow.pyfunc.load_model(uri)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"MLflowモデルの読み込みに失敗しました: {exc}") from exc
+
+    def _infer_expected_features(self, model) -> list[str] | None:
+        """学習時の特徴量名を可能な限り推定"""
+        try:
+            names = getattr(model, "feature_names_in_", None)
+            if names is not None:
+                return [str(x) for x in list(names)]
+            impl = getattr(model, "_model_impl", None)
+            if impl is not None:
+                py_model = getattr(impl, "python_model", None)
+                if py_model is not None:
+                    inner = getattr(py_model, "model", None)
+                    names = getattr(inner, "feature_names_in_", None)
+                    if names is not None:
+                        return [str(x) for x in list(names)]
+        except Exception:
+            return None
+        return None
+
+    def reload_model(self) -> None:
+        """MLflowの指定ステージから最新モデルを再読込"""
+        self.model = self._load_mlflow_model(self.model_uri)
+        self.expected_feature_names = self._infer_expected_features(self.model)
+        # バージョン情報更新
+        try:
+            client = mlflow.tracking.MlflowClient()
+            versions = client.get_latest_versions(
+                self.model_name, stages=[self.model_stage]
+            )
+            if versions:
+                self.model_version = versions[0].version
+        except Exception:
+            self.model_version = None
+
+    def get_evaluation_metrics(self) -> ModelEvaluationMetrics:
+        """現在のProductionモデルの評価メトリクスを取得"""
+        try:
+            client = mlflow.tracking.MlflowClient()
+            versions = client.get_latest_versions(
+                self.model_name, stages=[self.model_stage]
+            )
+            if not versions:
+                return ModelEvaluationMetrics()
+
+            model_version = versions[0]
+            run_id = model_version.run_id
+
+            # runのメトリクスを取得
+            run = client.get_run(run_id)
+            metrics = run.data.metrics
+
+            return ModelEvaluationMetrics(
+                train_rmse=metrics.get("train_rmse"),
+                train_mae=metrics.get("train_mae"),
+                train_r2=metrics.get("train_r2"),
+                val_rmse=metrics.get("val_rmse"),
+                val_mae=metrics.get("val_mae"),
+                val_r2=metrics.get("val_r2"),
+            )
+        except Exception:
+            # メトリクス取得に失敗した場合は空のメトリクスを返す
+            return ModelEvaluationMetrics()
+
     def _load_hourly_dataframe(self) -> pd.DataFrame:
-        hours = MAX_HOURLY_FILES + 48
-        df = self.market_client.fetch_recent_hours(hours)
+        df = self.market_client.fetch_last_week()
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         df = df.sort_values("timestamp").drop_duplicates(
             subset=["timestamp"], keep="last"
@@ -194,7 +273,7 @@ class ModelService:
 
     def _prepare_latest_sample(
         self, forecast_horizon: int
-    ) -> tuple[pd.DataFrame, float, datetime]:
+    ) -> tuple[pd.DataFrame, float, datetime, dict]:
         raw_df = self._load_hourly_dataframe()
         features_df = create_all_features(
             raw_df, target_col="usd_price", timestamp_col="timestamp"
@@ -218,6 +297,28 @@ class ModelService:
         if X.empty or y.empty:
             raise ValueError("特徴量の準備に失敗しました（有効サンプルがありません）")
 
+        diagnostics: dict = {}
+        original_columns = list(X.columns)
+        # 学習時の特徴量セットに整形（不足は0で補完、余分は削除）
+        if self.expected_feature_names:
+            inter = set(original_columns).intersection(self.expected_feature_names)
+            alignment_ratio = len(inter) / max(len(self.expected_feature_names), 1)
+            X = X.reindex(columns=self.expected_feature_names, fill_value=0)
+            zero_filled = len(
+                [c for c in self.expected_feature_names if c not in original_columns]
+            )
+            diagnostics = {
+                "feature_alignment_ratio": alignment_ratio,
+                "num_zero_filled_features": zero_filled,
+                "total_expected_features": len(self.expected_feature_names),
+            }
+        else:
+            diagnostics = {
+                "feature_alignment_ratio": None,
+                "num_zero_filled_features": None,
+                "total_expected_features": None,
+            }
+
         latest_index = X.index[-1]
         X_latest = X.loc[[latest_index]]
         baseline_price = float(features_df.loc[latest_index, "usd_price"])
@@ -225,10 +326,10 @@ class ModelService:
             features_df.loc[latest_index, "timestamp"], utc=True
         )
 
-        return X_latest, baseline_price, base_timestamp
+        return X_latest, baseline_price, base_timestamp, diagnostics
 
     def predict(self, forecast_horizon: int) -> PredictionResponse:
-        X_latest, baseline_price, base_timestamp = self._prepare_latest_sample(
+        X_latest, baseline_price, base_timestamp, diag = self._prepare_latest_sample(
             forecast_horizon
         )
         prediction = float(self.model.predict(X_latest)[0])
@@ -248,30 +349,65 @@ class ModelService:
             prediction_error_pct=abs(error) / baseline_price * 100
             if baseline_price
             else None,
+            feature_alignment_ratio=diag.get("feature_alignment_ratio"),
+            num_zero_filled_features=diag.get("num_zero_filled_features"),
+            total_expected_features=diag.get("total_expected_features"),
         )
 
-    def get_recent_prices(self, hours: int) -> list[PricePoint]:
+    def predict_series(self, hours: int) -> tuple[list[PricePoint], str, dict]:
+        """予測系列を生成し、評価情報も返す"""
         if hours <= 0:
             raise ValueError("hours は1以上を指定してください")
-
-        df = self._load_hourly_dataframe()
-        cutoff = datetime.now(tz=UTC) - timedelta(hours=hours)
-        df = df[df["timestamp"] >= cutoff]
-        df = df.sort_values("timestamp")
-
-        if df.empty:
-            raise ValueError("指定された時間範囲に価格データが存在しません")
-
-        if "usd_price" not in df.columns:
-            raise ValueError("データセットに usd_price 列が存在しません")
-
-        return [
-            PricePoint(
-                timestamp=pd.to_datetime(row["timestamp"], utc=True).isoformat(),
-                price=float(row["usd_price"]),
+        raw_df = self._load_hourly_dataframe()
+        features_df = create_all_features(
+            raw_df, target_col="usd_price", timestamp_col="timestamp"
+        )
+        out: list[PricePoint] = []
+        base_timestamp_str = ""
+        eval_info: dict = {}
+        for h in range(1, hours + 1):
+            X, y = prepare_features_for_training(
+                features_df,
+                target_col="usd_price",
+                forecast_horizon=h,
+                drop_na=False,
             )
-            for _, row in df.iterrows()
-        ]
+            X = X.drop(columns=[col for col in TIME_COLUMNS if col in X.columns])
+            X = X.replace([pd.NA, float("inf"), float("-inf")], pd.NA)
+            y = y.replace([pd.NA, float("inf"), float("-inf")], pd.NA)
+            valid_mask = ~(X.isna().any(axis=1) | y.isna())
+            X = X[valid_mask]
+            if X.empty:
+                continue
+            if self.expected_feature_names:
+                X = X.reindex(columns=self.expected_feature_names, fill_value=0)
+            latest_index = X.index[-1]
+            X_latest = X.loc[[latest_index]]
+            base_timestamp = pd.to_datetime(
+                features_df.loc[latest_index, "timestamp"], utc=True
+            )
+            if h == 1:
+                base_timestamp_str = base_timestamp.isoformat()
+                # 最初の予測時点で評価情報を取得
+                if self.expected_feature_names:
+                    provided_cols = set(X_latest.columns)
+                    expected_cols = set(self.expected_feature_names)
+                    aligned = len(provided_cols & expected_cols)
+                    total = len(expected_cols)
+                    zero_filled = len(expected_cols - provided_cols)
+                    eval_info = {
+                        "feature_alignment_ratio": aligned / total
+                        if total > 0
+                        else 0.0,
+                        "num_zero_filled_features": zero_filled,
+                        "total_expected_features": total,
+                    }
+            target_timestamp = base_timestamp + timedelta(hours=h)
+            pred = float(self.model.predict(X_latest)[0])
+            out.append(PricePoint(timestamp=target_timestamp.isoformat(), price=pred))
+        if not out:
+            raise ValueError("予測系列を生成できませんでした")
+        return out, base_timestamp_str, eval_info
 
 
 @lru_cache(maxsize=1)
@@ -301,6 +437,44 @@ def health() -> HealthResponse:
     )
 
 
+@app.post("/model/reload")
+def reload_model() -> dict:
+    """MLflowの最新モデル（指定ステージ）を再ロード"""
+    try:
+        service = get_model_service()
+        service.reload_model()
+        return {
+            "status": "reloaded",
+            "model_name": service.model_name,
+            "model_stage": service.model_stage,
+            "model_version": service.model_version,
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/model/info")
+def model_info() -> dict:
+    """現在ロード済みモデルの情報"""
+    service = get_model_service()
+    return {
+        "model_name": service.model_name,
+        "model_stage": service.model_stage,
+        "model_version": service.model_version,
+        "expected_features": service.expected_feature_names or [],
+    }
+
+
+@app.get("/model/evaluation", response_model=ModelEvaluationMetrics)
+def get_model_evaluation() -> ModelEvaluationMetrics:
+    """現在のProductionモデルの評価メトリクスを取得"""
+    try:
+        service = get_model_service()
+        return service.get_evaluation_metrics()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/predict", response_model=PredictionResponse)
 def predict() -> PredictionResponse:
     try:
@@ -310,7 +484,8 @@ def predict() -> PredictionResponse:
 
     forecast_horizon = DEFAULT_FORECAST_HORIZON
     try:
-        return service.predict(forecast_horizon)
+        resp = service.predict(forecast_horizon)
+        return resp
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -319,14 +494,12 @@ def predict() -> PredictionResponse:
 
 @app.get("/timeseries", response_model=TimeSeriesResponse)
 def get_timeseries(hours: int = Query(96, ge=1)) -> TimeSeriesResponse:
-    clamped_hours = min(hours, MAX_HOURLY_FILES)
     try:
         client = get_market_client()
-        df = client.fetch_recent_hours(clamped_hours + 48)
+        df = client.fetch_last_week()
         df = df.sort_values("timestamp").drop_duplicates(
             subset=["timestamp"], keep="last"
         )
-        df = df.tail(clamped_hours)
         if df.empty:
             raise ValueError("指定された時間範囲に価格データが存在しません")
         if "usd_price" not in df.columns:
@@ -346,3 +519,24 @@ def get_timeseries(hours: int = Query(96, ge=1)) -> TimeSeriesResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return TimeSeriesResponse(points=points)
+
+
+@app.get("/predict_series", response_model=ForecastSeriesResponse)
+def predict_series(hours: int = Query(168, ge=1, le=168)) -> ForecastSeriesResponse:
+    try:
+        service = get_model_service()
+        points, base_timestamp, eval_info = service.predict_series(hours)
+        return ForecastSeriesResponse(
+            model_name=service.model_name,
+            model_version=service.model_version,
+            forecast_horizon_hours=hours,
+            base_timestamp=base_timestamp,
+            points=points,
+            feature_alignment_ratio=eval_info.get("feature_alignment_ratio"),
+            num_zero_filled_features=eval_info.get("num_zero_filled_features"),
+            total_expected_features=eval_info.get("total_expected_features"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
