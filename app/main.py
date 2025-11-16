@@ -203,18 +203,71 @@ class ModelService:
     def _infer_expected_features(self, model) -> list[str] | None:
         """学習時の特徴量名を可能な限り推定"""
         try:
+            # 方法1: 直接モデルから取得を試行
             names = getattr(model, "feature_names_in_", None)
             if names is not None:
                 return [str(x) for x in list(names)]
+
+            # 方法2: MLflow pyfuncモデルの内部構造を探索
             impl = getattr(model, "_model_impl", None)
             if impl is not None:
                 py_model = getattr(impl, "python_model", None)
                 if py_model is not None:
                     inner = getattr(py_model, "model", None)
-                    names = getattr(inner, "feature_names_in_", None)
-                    if names is not None:
-                        return [str(x) for x in list(names)]
-        except Exception:
+                    if inner is not None:
+                        names = getattr(inner, "feature_names_in_", None)
+                        if names is not None:
+                            return [str(x) for x in list(names)]
+                        # XGBoostモデルの場合
+                        if hasattr(inner, "get_booster"):
+                            try:
+                                booster = inner.get_booster()
+                                feature_names = booster.feature_names
+                                if feature_names:
+                                    return [str(x) for x in feature_names]
+                            except Exception:
+                                pass
+                        # LightGBMモデルの場合
+                        if hasattr(inner, "booster_"):
+                            try:
+                                booster = inner.booster_
+                                feature_names = booster.feature_name()
+                                if feature_names:
+                                    return [str(x) for x in feature_names]
+                            except Exception:
+                                pass
+                        # sklearnラッパーの場合
+                        if hasattr(inner, "estimator"):
+                            estimator = inner.estimator
+                            names = getattr(estimator, "feature_names_in_", None)
+                            if names is not None:
+                                return [str(x) for x in list(names)]
+
+            # 方法3: MLflowのrunから特徴量数を取得（フォールバック）
+            try:
+                client = mlflow.tracking.MlflowClient()
+                versions = client.get_latest_versions(
+                    self.model_name, stages=[self.model_stage]
+                )
+                if versions:
+                    run_id = versions[0].run_id
+                    run = client.get_run(run_id)
+                    # runのtagsやparamsから特徴量数を取得
+                    if "features" in run.data.params:
+                        feature_count = int(run.data.params["features"])
+                        # 特徴量名は取得できないが、数だけでも有用
+                        print(f"MLflow runから特徴量数を取得: {feature_count}")
+            except Exception:
+                pass
+
+            # 方法4: 実際に予測を試みて特徴量数を推測（最後の手段）
+            # これは後で実装する
+
+        except Exception as e:
+            print(f"特徴量名の推定に失敗しました: {e}")
+            import traceback
+
+            traceback.print_exc()
             return None
         return None
 
@@ -393,9 +446,6 @@ class ModelService:
                 f"特徴量データ: {features_df.shape}, 準備後: {X_base.shape}"
             )
 
-        if self.expected_feature_names:
-            X_base = X_base.reindex(columns=self.expected_feature_names, fill_value=0)
-
         # 最新のインデックスを使用（元のfeatures_dfから）
         latest_index = features_df.index[-1]
         base_timestamp = pd.to_datetime(
@@ -406,8 +456,16 @@ class ModelService:
         # 評価情報を取得
         eval_info: dict = {}
         if self.expected_feature_names:
-            X_latest = X_base.loc[[latest_index]]
-            provided_cols = set(X_latest.columns)
+            # X_baseを期待する特徴量に合わせて調整
+            X_base_aligned = X_base.reindex(
+                columns=self.expected_feature_names, fill_value=0
+            )
+            if latest_index in X_base_aligned.index:
+                X_latest = X_base_aligned.loc[[latest_index]]
+            else:
+                X_latest = X_base_aligned.iloc[[-1]]
+
+            provided_cols = set(X_base.columns)
             expected_cols = set(self.expected_feature_names)
             aligned = len(provided_cols & expected_cols)
             total = len(expected_cols)
@@ -435,21 +493,48 @@ class ModelService:
 
             if X.empty:
                 continue
-            if self.expected_feature_names:
-                X = X.reindex(columns=self.expected_feature_names, fill_value=0)
 
             # 最新のインデックスを使用（base_timestampと同じ時点）
             # features_dfの最新インデックスを使用
             latest_idx = latest_index
             if latest_idx in X.index:
-                X_latest = X.loc[[latest_idx]]
+                X_latest = X.loc[[latest_idx]].copy()
             else:
                 # インデックスが一致しない場合は最後の行を使用
-                X_latest = X.iloc[[-1]]
+                X_latest = X.iloc[[-1]].copy()
+
+            # モデルが期待する特徴量に合わせて調整
+            if self.expected_feature_names:
+                # 不足している特徴量は0で埋め、余分な特徴量は削除
+                X_latest = X_latest.reindex(
+                    columns=self.expected_feature_names, fill_value=0
+                )
+            # expected_feature_namesが取得できない場合は、そのまま予測を試みる
 
             # タイムスタンプはbase_timestampからh時間後
             target_timestamp = base_timestamp + timedelta(hours=h)
-            pred = float(self.model.predict(X_latest)[0])
+            try:
+                pred = float(self.model.predict(X_latest)[0])
+            except Exception as pred_exc:
+                error_msg = str(pred_exc)
+                # エラーメッセージから期待される特徴量数を抽出
+                import re
+
+                match = re.search(
+                    r"expected[:\s]+(\d+)[,\s]+got[:\s]+(\d+)", error_msg, re.IGNORECASE
+                )
+                if match:
+                    expected_count = int(match.group(1))
+                    got_count = int(match.group(2))
+                    raise RuntimeError(
+                        f"特徴量数の不一致: 期待={expected_count}, 実際={got_count}. "
+                        f"モデルを新しい特徴量セットで再訓練してください。"
+                    ) from pred_exc
+                else:
+                    raise RuntimeError(
+                        f"予測に失敗しました: {pred_exc}. "
+                        f"特徴量数: {len(X_latest.columns)}"
+                    ) from pred_exc
             out.append(PricePoint(timestamp=target_timestamp.isoformat(), price=pred))
 
         if not out:
@@ -584,6 +669,10 @@ def predict_series(hours: int = Query(168, ge=1, le=168)) -> ForecastSeriesRespo
             total_expected_features=eval_info.get("total_expected_features"),
         )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        # ValueErrorは400 Bad Requestとして返す（404ではない）
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        # RuntimeErrorは503 Service Unavailableとして返す
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
