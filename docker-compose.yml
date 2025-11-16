@@ -268,22 +268,6 @@ services:
         condition: service_started
     restart: always
 
-  grafana:
-    image: grafana/grafana:10.4.2
-    container_name: grafana
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
-    volumes:
-      - grafana-data:/var/lib/grafana
-    depends_on:
-      fastapi:
-        condition: service_started
-    restart: always
-
 volumes:
   postgres-db-volume:
   mlflow-data:
-  grafana-data:
