@@ -249,7 +249,13 @@ def train_models(**context) -> dict:
 
     # モデルを訓練（MLflow統合）
     use_mlflow = os.getenv("USE_MLFLOW", "true").lower() == "true"
-    trainer = ModelTrainer(random_state=42, use_mlflow=use_mlflow)
+    enable_scaling = os.getenv("ENABLE_FEATURE_SCALING", "true").lower() == "true"
+    trainer = ModelTrainer(
+        random_state=42,
+        use_mlflow=use_mlflow,
+        enable_scaling=enable_scaling,
+        enable_feature_selection=False,
+    )
 
     # MLflow runを開始
     if use_mlflow:
@@ -280,7 +286,8 @@ def train_models(**context) -> dict:
                     "forecast_horizon_hours": FORECAST_HORIZON_HOURS,
                 }
             )
-            trainer.train_xgboost_model(
+            # すべてのモデルを訓練（XGBoost + LightGBM）
+            trainer.train_all_models(
                 X_train,
                 y_train,
                 X_val,
@@ -333,7 +340,7 @@ def train_models(**context) -> dict:
                 print(f"Model registration/promotion error (ignored): {e}")
 
     else:
-        trainer.train_xgboost_model(X_train, y_train, X_val, y_val)
+        trainer.train_all_models(X_train, y_train, X_val, y_val)
 
     # 評価結果を取得
     evaluation_summary = trainer.get_evaluation_summary()

@@ -10,7 +10,10 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from utils.feature_engineering import create_all_features, prepare_features_for_training
+from utils.feature_engineering import (
+    create_all_features,
+    prepare_features_for_training,
+)
 
 TIME_COLUMNS = {"timestamp", "timestamp_jst", "retrieved_at"}
 
@@ -359,12 +362,64 @@ class ModelService:
         if hours <= 0:
             raise ValueError("hours は1以上を指定してください")
         raw_df = self._load_hourly_dataframe()
+
+        if raw_df.empty:
+            raise ValueError("価格データが取得できませんでした")
+
         features_df = create_all_features(
             raw_df, target_col="usd_price", timestamp_col="timestamp"
         )
-        out: list[PricePoint] = []
-        base_timestamp_str = ""
+
+        # ベースタイムスタンプを最初に1回だけ計算
+        # 最新のデータポイントを使用（forecast_horizon=1で最後の行が有効になる）
+        X_base, y_base = prepare_features_for_training(
+            features_df,
+            target_col="usd_price",
+            forecast_horizon=1,
+            drop_na=False,
+        )
+        X_base = X_base.drop(
+            columns=[col for col in TIME_COLUMNS if col in X_base.columns]
+        )
+        X_base = X_base.replace([pd.NA, float("inf"), float("-inf")], pd.NA)
+
+        # NaNを0で埋める（予測に必要な最小限の処理）
+        # 完全にNaNの行のみ除外
+        X_base = X_base.fillna(0)
+
+        if X_base.empty:
+            raise ValueError(
+                f"予測系列を生成できませんでした（ベースデータがありません）。"
+                f"特徴量データ: {features_df.shape}, 準備後: {X_base.shape}"
+            )
+
+        if self.expected_feature_names:
+            X_base = X_base.reindex(columns=self.expected_feature_names, fill_value=0)
+
+        # 最新のインデックスを使用（元のfeatures_dfから）
+        latest_index = features_df.index[-1]
+        base_timestamp = pd.to_datetime(
+            features_df.loc[latest_index, "timestamp"], utc=True
+        )
+        base_timestamp_str = base_timestamp.isoformat()
+
+        # 評価情報を取得
         eval_info: dict = {}
+        if self.expected_feature_names:
+            X_latest = X_base.loc[[latest_index]]
+            provided_cols = set(X_latest.columns)
+            expected_cols = set(self.expected_feature_names)
+            aligned = len(provided_cols & expected_cols)
+            total = len(expected_cols)
+            zero_filled = len(expected_cols - provided_cols)
+            eval_info = {
+                "feature_alignment_ratio": aligned / total if total > 0 else 0.0,
+                "num_zero_filled_features": zero_filled,
+                "total_expected_features": total,
+            }
+
+        # 予測系列を生成
+        out: list[PricePoint] = []
         for h in range(1, hours + 1):
             X, y = prepare_features_for_training(
                 features_df,
@@ -374,37 +429,29 @@ class ModelService:
             )
             X = X.drop(columns=[col for col in TIME_COLUMNS if col in X.columns])
             X = X.replace([pd.NA, float("inf"), float("-inf")], pd.NA)
-            y = y.replace([pd.NA, float("inf"), float("-inf")], pd.NA)
-            valid_mask = ~(X.isna().any(axis=1) | y.isna())
-            X = X[valid_mask]
+
+            # NaNを0で埋める
+            X = X.fillna(0)
+
             if X.empty:
                 continue
             if self.expected_feature_names:
                 X = X.reindex(columns=self.expected_feature_names, fill_value=0)
-            latest_index = X.index[-1]
-            X_latest = X.loc[[latest_index]]
-            base_timestamp = pd.to_datetime(
-                features_df.loc[latest_index, "timestamp"], utc=True
-            )
-            if h == 1:
-                base_timestamp_str = base_timestamp.isoformat()
-                # 最初の予測時点で評価情報を取得
-                if self.expected_feature_names:
-                    provided_cols = set(X_latest.columns)
-                    expected_cols = set(self.expected_feature_names)
-                    aligned = len(provided_cols & expected_cols)
-                    total = len(expected_cols)
-                    zero_filled = len(expected_cols - provided_cols)
-                    eval_info = {
-                        "feature_alignment_ratio": aligned / total
-                        if total > 0
-                        else 0.0,
-                        "num_zero_filled_features": zero_filled,
-                        "total_expected_features": total,
-                    }
+
+            # 最新のインデックスを使用（base_timestampと同じ時点）
+            # features_dfの最新インデックスを使用
+            latest_idx = latest_index
+            if latest_idx in X.index:
+                X_latest = X.loc[[latest_idx]]
+            else:
+                # インデックスが一致しない場合は最後の行を使用
+                X_latest = X.iloc[[-1]]
+
+            # タイムスタンプはbase_timestampからh時間後
             target_timestamp = base_timestamp + timedelta(hours=h)
             pred = float(self.model.predict(X_latest)[0])
             out.append(PricePoint(timestamp=target_timestamp.isoformat(), price=pred))
+
         if not out:
             raise ValueError("予測系列を生成できませんでした")
         return out, base_timestamp_str, eval_info

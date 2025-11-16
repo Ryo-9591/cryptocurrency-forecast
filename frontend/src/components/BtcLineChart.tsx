@@ -2,6 +2,7 @@ import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -30,7 +31,12 @@ function toLocalLabel(timestamp: string): string {
 function buildChartData(
   historical: PricePoint[],
   forecast?: PricePoint[] | null
-): Array<{ timestamp: string; actual: number | null; forecast: number | null }> {
+): Array<{ 
+  timestamp: string; 
+  actual: number | null; 
+  forecast: number | null;
+  forecastStart: boolean;
+}> {
   const histSorted = [...historical].sort(
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
@@ -39,9 +45,12 @@ function buildChartData(
   const data = histSorted.map((p) => ({
     timestamp: p.timestamp,
     actual: p.price,
-    forecast: null
+    forecast: null as number | null,
+    forecastStart: false
   }));
 
+  // 予測開始点のタイムスタンプを特定
+  let forecastStartTimestamp: number | null = null;
   if (forecast && forecast.length > 0) {
     const futSorted = [...forecast].sort(
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
@@ -53,43 +62,37 @@ function buildChartData(
     const lastHistPrice = lastHist ? lastHist.actual : null;
 
     if (!isNaN(lastHistTs) && lastHistPrice !== null && futSorted.length > 0) {
-      // 実績の最後の点から予測の最初の点まで繋げる
       const firstForecast = futSorted[0];
       const firstForecastTs = new Date(firstForecast.timestamp).getTime();
+      forecastStartTimestamp = lastHistTs;
       
-      // 実績の最後の点に予測の最初の点の価格を設定（繋げるため）
-      // これにより、実績の最後の点から予測の最初の点まで線が繋がる
+      // 実績の最後の点に予測開始マーカーを設定
       if (data.length > 0) {
         data[data.length - 1] = {
           ...data[data.length - 1],
-          forecast: firstForecast.price
+          forecastStart: true
         };
       }
       
       // 予測のすべての点を追加
-      // 実績の最後の点と同じ時刻またはそれより後の時刻の予測点を追加
       for (const p of futSorted) {
         const pTs = new Date(p.timestamp).getTime();
-        // 実績の最後の点と同じ時刻またはそれより後の時刻の予測点を追加
-        // 同じ時刻の場合は既に実績の最後の点に設定済みだが、予測点としても追加する
-        if (pTs >= lastHistTs) {
-          // 実績の最後の点と同じ時刻の場合は、予測点として追加（実績の点とは別のデータポイント）
-          // これにより、予測線が確実に表示される
+        // 実績の最後の点より後の時刻の予測点を追加
+        if (pTs > lastHistTs) {
           const existingIndex = data.findIndex(
             (d) => new Date(d.timestamp).getTime() === pTs
           );
           if (existingIndex >= 0) {
-            // 既存の点がある場合は、予測値を更新
             data[existingIndex] = {
               ...data[existingIndex],
               forecast: p.price
             };
           } else {
-            // 新しい点として追加
             data.push({
               timestamp: p.timestamp,
               actual: null,
-              forecast: p.price
+              forecast: p.price,
+              forecastStart: false
             });
           }
         }
@@ -100,7 +103,8 @@ function buildChartData(
         data.push({
           timestamp: p.timestamp,
           actual: null,
-          forecast: p.price
+          forecast: p.price,
+          forecastStart: false
         });
       }
     }
@@ -150,6 +154,12 @@ function renderTooltipContent({
           予測: {forecast.toLocaleString("ja-JP", { maximumFractionDigits: 2 })} USD
         </div>
       )}
+      {actual != null && forecast != null && (
+        <div style={{ fontSize: "0.85rem", color: "#64748b", marginTop: 4 }}>
+          差: {Math.abs(forecast - actual).toLocaleString("ja-JP", { maximumFractionDigits: 2 })} USD
+          ({((Math.abs(forecast - actual) / actual) * 100).toFixed(2)}%)
+        </div>
+      )}
     </div>
   );
 }
@@ -181,6 +191,10 @@ export default function BtcLineChart({ historical, forecast }: Props) {
     console.log("予測データが含まれるチャートデータ:", chartData.filter(d => d.forecast !== null).length);
   }
 
+  // 予測開始点を特定
+  const forecastStartPoint = chartData.find(d => d.forecastStart);
+  const forecastStartTimestamp = forecastStartPoint?.timestamp;
+
   return (
     <div className="chart-wrapper">
       <ResponsiveContainer width="100%" height="100%">
@@ -207,6 +221,17 @@ export default function BtcLineChart({ historical, forecast }: Props) {
             width={80}
           />
           <Tooltip content={renderTooltipContent} />
+          {/* 予測開始点の縦線 */}
+          {forecastStartTimestamp && (
+            <ReferenceLine
+              x={forecastStartTimestamp}
+              stroke="#f59e0b"
+              strokeWidth={2}
+              strokeDasharray="5 5"
+              label={{ value: "予測開始", position: "top", fill: "#f59e0b", fontSize: 12 }}
+            />
+          )}
+          {/* 実績データ */}
           <Line
             type="monotone"
             dataKey="actual"
@@ -217,12 +242,14 @@ export default function BtcLineChart({ historical, forecast }: Props) {
             name="実績"
             isAnimationActive={false}
           />
+          {/* 予測データ（点線 + 点表示） */}
           <Line
             type="monotone"
             dataKey="forecast"
-            stroke="#f59e0b"
+            stroke="#16a34a"
             strokeWidth={2.4}
-            dot={false}
+            strokeDasharray="8 4"
+            dot={{ fill: "#16a34a", r: 4, strokeWidth: 2, stroke: "#fff" }}
             connectNulls={false}
             name="予測"
             isAnimationActive={false}

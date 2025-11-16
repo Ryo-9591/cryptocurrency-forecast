@@ -29,6 +29,7 @@ x-airflow-common: &airflow-common
     - ./plugins:/opt/airflow/plugins
     - ./data:/opt/airflow/data
     - ./utils:/opt/airflow/utils
+    - ./config:/opt/airflow/config
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on: &airflow-common-depends-on
     postgres:
@@ -251,6 +252,7 @@ services:
     volumes:
       - ./utils:/app/utils:ro
       - ./app:/app/app:ro
+      - ./config:/app/config:ro
     restart: always
 
   frontend:
