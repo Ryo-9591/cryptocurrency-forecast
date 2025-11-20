@@ -4,58 +4,70 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --background: oklch(0.16 0.005 264);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.22 0.01 264);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.22 0.01 264);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.75 0.2 142);
-  --primary-foreground: oklch(0.16 0.005 264);
-  --secondary: oklch(0.3 0.015 264);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.3 0.015 264);
-  --muted-foreground: oklch(0.65 0.01 264);
-  --accent: oklch(0.75 0.18 52);
-  --accent-foreground: oklch(0.16 0.005 264);
-  --destructive: oklch(0.6 0.22 25);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.32 0.015 264);
-  --input: oklch(0.32 0.015 264);
-  --ring: oklch(0.75 0.2 142);
-  --chart-1: oklch(0.75 0.2 142);
-  --chart-2: oklch(0.75 0.18 52);
-  --chart-3: oklch(0.65 0.2 280);
-  --chart-4: oklch(0.7 0.22 25);
-  --chart-5: oklch(0.68 0.18 190);
-  --radius: 0.75rem;
+  /* Default to dark mode values for a "rich" feel immediately, or define light mode if strictly needed. 
+     Given the request for "Rich & Professional" and "Dark mode focus", we will prioritize the dark look. */
+  --background: oklch(0.10 0.02 264); /* Deep Navy/Black */
+  --foreground: oklch(0.98 0.00 0);
+  
+  --card: oklch(0.14 0.03 264 / 0.7); /* Glassmorphism base */
+  --card-foreground: oklch(0.98 0.00 0);
+  
+  --popover: oklch(0.14 0.03 264 / 0.9);
+  --popover-foreground: oklch(0.98 0.00 0);
+  
+  --primary: oklch(0.65 0.22 260); /* Electric Blue/Purple */
+  --primary-foreground: oklch(0.98 0.00 0);
+  
+  --secondary: oklch(0.20 0.04 264);
+  --secondary-foreground: oklch(0.98 0.00 0);
+  
+  --muted: oklch(0.20 0.04 264);
+  --muted-foreground: oklch(0.70 0.02 264);
+  
+  --accent: oklch(0.65 0.20 320); /* Magenta/Purple Accent */
+  --accent-foreground: oklch(0.98 0.00 0);
+  
+  --destructive: oklch(0.55 0.25 25);
+  --destructive-foreground: oklch(0.98 0.00 0);
+  
+  --border: oklch(0.25 0.05 264 / 0.3);
+  --input: oklch(0.25 0.05 264 / 0.3);
+  --ring: oklch(0.65 0.22 260);
+  
+  --chart-1: oklch(0.65 0.22 260); /* Blue */
+  --chart-2: oklch(0.65 0.20 320); /* Purple */
+  --chart-3: oklch(0.75 0.18 150); /* Green/Teal */
+  --chart-4: oklch(0.70 0.20 40);  /* Orange */
+  --chart-5: oklch(0.70 0.20 280); /* Violet */
+  
+  --radius: 1rem; /* More rounded for modern feel */
 }
 
 .dark {
-  --background: oklch(0.16 0.005 264);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.22 0.01 264);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.22 0.01 264);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.75 0.2 142);
-  --primary-foreground: oklch(0.16 0.005 264);
-  --secondary: oklch(0.3 0.015 264);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.3 0.015 264);
-  --muted-foreground: oklch(0.65 0.01 264);
-  --accent: oklch(0.75 0.18 52);
-  --accent-foreground: oklch(0.16 0.005 264);
-  --destructive: oklch(0.6 0.22 25);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.32 0.015 264);
-  --input: oklch(0.32 0.015 264);
-  --ring: oklch(0.75 0.2 142);
-  --chart-1: oklch(0.75 0.2 142);
-  --chart-2: oklch(0.75 0.18 52);
-  --chart-3: oklch(0.65 0.2 280);
-  --chart-4: oklch(0.7 0.22 25);
-  --chart-5: oklch(0.68 0.18 190);
+  --background: oklch(0.10 0.02 264);
+  --foreground: oklch(0.98 0.00 0);
+  --card: oklch(0.14 0.03 264 / 0.7);
+  --card-foreground: oklch(0.98 0.00 0);
+  --popover: oklch(0.14 0.03 264 / 0.9);
+  --popover-foreground: oklch(0.98 0.00 0);
+  --primary: oklch(0.65 0.22 260);
+  --primary-foreground: oklch(0.98 0.00 0);
+  --secondary: oklch(0.20 0.04 264);
+  --secondary-foreground: oklch(0.98 0.00 0);
+  --muted: oklch(0.20 0.04 264);
+  --muted-foreground: oklch(0.70 0.02 264);
+  --accent: oklch(0.65 0.20 320);
+  --accent-foreground: oklch(0.98 0.00 0);
+  --destructive: oklch(0.55 0.25 25);
+  --destructive-foreground: oklch(0.98 0.00 0);
+  --border: oklch(0.25 0.05 264 / 0.3);
+  --input: oklch(0.25 0.05 264 / 0.3);
+  --ring: oklch(0.65 0.22 260);
+  --chart-1: oklch(0.65 0.22 260);
+  --chart-2: oklch(0.65 0.20 320);
+  --chart-3: oklch(0.75 0.18 150);
+  --chart-4: oklch(0.70 0.20 40);
+  --chart-5: oklch(0.70 0.20 280);
 }
 
 @theme inline {
@@ -97,5 +109,21 @@
   }
   body {
     @apply bg-background text-foreground;
+    /* Add a subtle mesh gradient background */
+    background-image: 
+      radial-gradient(at 0% 0%, oklch(0.20 0.10 260 / 0.2) 0px, transparent 50%),
+      radial-gradient(at 100% 0%, oklch(0.20 0.10 320 / 0.2) 0px, transparent 50%),
+      radial-gradient(at 100% 100%, oklch(0.15 0.05 260 / 0.2) 0px, transparent 50%),
+      radial-gradient(at 0% 100%, oklch(0.15 0.05 320 / 0.2) 0px, transparent 50%);
+    background-attachment: fixed;
   }
+}
+
+/* Glassmorphism Utilities */
+@utility glass {
+  @apply bg-card/70 backdrop-blur-md border border-white/10 shadow-xl;
+}
+
+@utility glass-hover {
+  @apply hover:bg-card/80 hover:border-white/20 transition-all duration-300;
 }

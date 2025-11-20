@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react'
 import { Card } from '@/components/ui/card'
-import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { Area, AreaChart, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, ReferenceLine } from 'recharts'
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
 import { getTimeSeries, getPredictSeries } from '@/lib/api'
 import { usePricePolling } from '@/hooks/use-price-polling'
@@ -23,6 +23,7 @@ export function CryptoChart() {
   const [chartData, setChartData] = useState<ChartDataPoint[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [predictionBaseTime, setPredictionBaseTime] = useState<string | null>(null)
   
   // 価格を取得（1分ごとにポーリング）
   const { price: currentPrice } = usePricePolling(60000)
@@ -36,6 +37,16 @@ export function CryptoChart() {
     if (chartData.length < 2 || !currentPrice) return null
     const firstPrice = chartData[0].price
     const change = ((currentPrice - firstPrice) / firstPrice) * 100
+    return change
+  }, [chartData, currentPrice])
+
+  // 予測トレンドを計算
+  const predictionTrend = useMemo(() => {
+    if (chartData.length === 0) return null
+    const lastData = chartData[chartData.length - 1]
+    if (lastData.prediction === null || !currentPrice) return null
+    
+    const change = ((lastData.prediction - currentPrice) / currentPrice) * 100
     return change
   }, [chartData, currentPrice])
 
@@ -54,6 +65,11 @@ export function CryptoChart() {
 
         // 予測データのbase_timestampを取得（予測が実行された時刻）
         const predictionBaseTimestamp = predictData ? new Date(predictData.base_timestamp).getTime() : null
+        
+        if (predictData) {
+           const date = new Date(predictData.base_timestamp)
+           setPredictionBaseTime(format(date, 'HH:mm'))
+        }
 
         // 時系列データをチャート形式に変換
         const priceMap = new Map<string, number>()
@@ -89,6 +105,25 @@ export function CryptoChart() {
           }
         })
 
+        // 予測データが時系列データより未来にある場合、それを追加
+        if (predictData && predictionBaseTimestamp !== null) {
+             predictData.points.forEach((point) => {
+                const pointTimestamp = new Date(point.timestamp).getTime()
+                const date = new Date(point.timestamp)
+                const timeKey = format(date, 'HH:mm')
+                
+                // 既存データにない場合のみ追加（未来の予測）
+                if (!data.find(d => d.time === timeKey) && pointTimestamp >= predictionBaseTimestamp) {
+                    data.push({
+                        time: timeKey,
+                        price: 0, // 未来なので実績なし（0またはnull、表示時に調整）
+                        prediction: point.price,
+                        timestamp: point.timestamp
+                    })
+                }
+            })
+        }
+
         setChartData(data)
       } catch (err) {
         console.error('データの取得に失敗しました:', err)
@@ -106,10 +141,12 @@ export function CryptoChart() {
     if (currentPrice && chartData.length > 0) {
       setChartData((prev) => {
         const updated = [...prev]
-        const lastIndex = updated.length - 1
-        if (lastIndex >= 0) {
-          updated[lastIndex] = {
-            ...updated[lastIndex],
+        // 実績データの最後のポイントを探す
+        const lastPriceIndex = updated.map(d => d.price).lastIndexOf(updated.filter(d => d.price > 0).pop()?.price || 0)
+        
+        if (lastPriceIndex >= 0) {
+          updated[lastPriceIndex] = {
+            ...updated[lastPriceIndex],
             price: currentPrice,
           }
         }
@@ -119,29 +156,44 @@ export function CryptoChart() {
   }, [currentPrice, chartData.length])
 
   // 表示価格（リアルタイム更新）
-  const displayPrice = currentPrice || (chartData.length > 0 ? chartData[chartData.length - 1].price : 0)
+  const displayPrice = currentPrice || (chartData.length > 0 ? chartData.filter(d => d.price > 0).pop()?.price || 0 : 0)
 
   return (
-    <Card className="p-6 bg-card">
-      <div className="mb-6 flex items-start justify-between">
+    <Card className="p-6 glass border-0 relative overflow-hidden">
+      {/* Background Glow Effect */}
+      <div className="absolute -top-20 -right-20 w-64 h-64 bg-primary/10 rounded-full blur-3xl pointer-events-none" />
+      <div className="absolute -bottom-20 -left-20 w-64 h-64 bg-accent/10 rounded-full blur-3xl pointer-events-none" />
+
+      <div className="mb-8 flex items-start justify-between relative z-10">
         <div>
-          <div className="flex items-center gap-2">
-            <h2 className="text-2xl font-bold text-foreground">BTC/USD</h2>
-            <span className="rounded-md bg-primary/10 px-2 py-1 text-sm font-medium text-primary">
+          <div className="flex items-center gap-3">
+            <h2 className="text-2xl font-bold text-foreground tracking-tight">BTC/USD</h2>
+            <span className="rounded-full bg-primary/20 px-3 py-1 text-xs font-bold text-primary ring-1 ring-primary/50 animate-pulse">
               LIVE
             </span>
           </div>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-3xl font-bold text-foreground">
-              ${displayPrice.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
-            </span>
-            {priceChange !== null && (
-              <span className={`text-lg font-medium ${priceChange >= 0 ? 'text-primary' : 'text-red-500'}`}>
-                {priceChange >= 0 ? '+' : ''}{priceChange.toFixed(2)}%
-              </span>
+          <div className="mt-3 flex items-baseline gap-4">
+            <div>
+                <span className="text-4xl font-black text-foreground tracking-tight">
+                ${displayPrice.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                </span>
+                {priceChange !== null && (
+                <span className={`ml-3 text-lg font-bold ${priceChange >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {priceChange >= 0 ? '+' : ''}{priceChange.toFixed(2)}%
+                </span>
+                )}
+            </div>
+            
+            {predictionTrend !== null && (
+                <div className="flex flex-col border-l border-white/10 pl-4">
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">AI Forecast</span>
+                    <span className={`text-sm font-bold ${predictionTrend >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {predictionTrend >= 0 ? 'UPTREND' : 'DOWNTREND'} ({predictionTrend >= 0 ? '+' : ''}{predictionTrend.toFixed(2)}%)
+                    </span>
+                </div>
             )}
           </div>
-          <p className="mt-1 text-sm text-muted-foreground">{timeRangeLabel}</p>
+          <p className="mt-1 text-xs text-muted-foreground uppercase tracking-widest">{timeRangeLabel}</p>
         </div>
       </div>
 
@@ -151,81 +203,151 @@ export function CryptoChart() {
         </div>
       ) : isLoading ? (
         <div className="h-[400px] flex items-center justify-center text-muted-foreground">
-          <p>読み込み中...</p>
+          <div className="flex flex-col items-center gap-4">
+            <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+            <p className="animate-pulse text-sm font-medium">Loading Market Data...</p>
+          </div>
         </div>
       ) : chartData.length === 0 ? (
         <div className="h-[400px] flex items-center justify-center text-muted-foreground">
           <p>データがありません</p>
         </div>
       ) : (
-        <div className="h-[400px]">
+        <div className="h-[400px] w-full">
           <ChartContainer
             config={{
               price: {
-                label: '実際の価格',
-                color: 'oklch(0.75 0.2 142)',
+                label: 'Actual Price',
+                color: 'hsl(var(--primary))',
               },
               prediction: {
-                label: 'AI予想',
-                color: 'oklch(0.75 0.18 52)',
+                label: 'AI Forecast',
+                color: 'hsl(var(--accent))',
               },
             }}
           >
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart 
+              <AreaChart
                 data={chartData}
-                margin={{ top: 5, right: 10, left: 10, bottom: 40 }}
+                margin={{ top: 20, right: 10, left: 0, bottom: 0 }}
               >
+                <defs>
+                  <linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.4}/>
+                    <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0}/>
+                  </linearGradient>
+                  <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+                    <feGaussianBlur stdDeviation="3" result="coloredBlur" />
+                    <feMerge>
+                      <feMergeNode in="coloredBlur" />
+                      <feMergeNode in="SourceGraphic" />
+                    </feMerge>
+                  </filter>
+                </defs>
                 <XAxis
                   dataKey="time"
-                  stroke="oklch(0.65 0.01 264)"
+                  stroke="hsl(var(--muted-foreground))"
                   fontSize={11}
                   tickLine={false}
                   axisLine={false}
                   interval="preserveStartEnd"
-                  tickMargin={8}
+                  minTickGap={30}
+                  tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 10 }}
                 />
                 <YAxis
-                  stroke="oklch(0.65 0.01 264)"
-                  fontSize={12}
+                  stroke="hsl(var(--muted-foreground))"
+                  fontSize={11}
                   tickLine={false}
                   axisLine={false}
                   tickFormatter={(value) => `$${(value / 1000).toFixed(0)}K`}
+                  domain={['auto', 'auto']}
+                  tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 10 }}
                 />
-                <ChartTooltip content={<ChartTooltipContent />} />
-                <Line
+                <ChartTooltip 
+                    cursor={{ stroke: 'hsl(var(--muted-foreground))', strokeWidth: 1, strokeDasharray: '4 4' }}
+                    content={({ active, payload, label }) => {
+                        if (active && payload && payload.length) {
+                        return (
+                            <div className="rounded-xl border border-white/10 bg-black/80 p-3 shadow-xl backdrop-blur-md">
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="flex flex-col">
+                                <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+                                    Time
+                                </span>
+                                <span className="font-mono font-bold text-foreground">
+                                    {label}
+                                </span>
+                                </div>
+                                {payload.map((entry) => (
+                                entry.value && entry.value > 0 ? (
+                                    <div key={entry.name} className="flex flex-col">
+                                    <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+                                        {entry.name === 'price' ? 'Actual' : 'Forecast'}
+                                    </span>
+                                    <span className={`font-mono font-bold ${entry.name === 'price' ? 'text-primary' : 'text-accent'}`}>
+                                        ${Number(entry.value).toLocaleString()}
+                                    </span>
+                                    </div>
+                                ) : null
+                                ))}
+                            </div>
+                            </div>
+                        )
+                        }
+                        return null
+                    }}
+                />
+                <Area
                   type="monotone"
                   dataKey="price"
-                  stroke="oklch(0.75 0.2 142)"
+                  stroke="hsl(var(--primary))"
+                  fillOpacity={1}
+                  fill="url(#colorPrice)"
                   strokeWidth={3}
-                  dot={false}
-                  isAnimationActive={false}
+                  connectNulls
+                  filter="url(#glow)"
                 />
                 {chartData.some((d) => d.prediction !== null) && (
                   <Line
                     type="monotone"
                     dataKey="prediction"
-                    stroke="oklch(0.75 0.18 52)"
-                    strokeWidth={2}
-                    strokeDasharray="5 5"
+                    stroke="hsl(var(--accent))"
+                    strokeWidth={3}
+                    strokeDasharray="4 4"
                     dot={false}
-                    isAnimationActive={false}
+                    connectNulls
+                    activeDot={{ r: 6, strokeWidth: 0, fill: 'hsl(var(--accent))' }}
+                    filter="url(#glow)"
                   />
                 )}
-              </LineChart>
+                {predictionBaseTime && (
+                    <ReferenceLine 
+                        x={predictionBaseTime} 
+                        stroke="hsl(var(--muted-foreground))" 
+                        strokeDasharray="3 3" 
+                        label={{ 
+                            position: 'top',  
+                            value: 'NOW', 
+                            fill: 'hsl(var(--muted-foreground))', 
+                            fontSize: 10,
+                            fontWeight: 'bold'
+                        }} 
+                    />
+                )}
+              </AreaChart>
             </ResponsiveContainer>
           </ChartContainer>
         </div>
       )}
 
-      <div className="mt-6 flex items-center gap-6">
+      <div className="mt-6 flex items-center justify-center gap-8">
         <div className="flex items-center gap-2">
-          <div className="size-3 rounded-full bg-primary" />
-          <span className="text-sm text-muted-foreground">実際の価格</span>
+          <div className="h-3 w-3 rounded-full bg-primary shadow-[0_0_10px_hsl(var(--primary))]" />
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Actual Price</span>
         </div>
         <div className="flex items-center gap-2">
-          <div className="size-3 rounded-full bg-accent" />
-          <span className="text-sm text-muted-foreground">AI予想</span>
+          <div className="h-0.5 w-6 border-t-2 border-dashed border-accent shadow-[0_0_10px_hsl(var(--accent))]" />
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">AI Forecast</span>
         </div>
       </div>
     </Card>
