@@ -16,6 +16,13 @@ docker compose --profile all up --build
 docker compose --profile all up
 ```
 
+起動後、以下のURLにアクセスしてください。
+
+*   **Web UI**: [http://localhost:3002](http://localhost:3002)
+*   **推論 API**: [http://localhost:8000/docs](http://localhost:8000/docs)
+*   **Airflow**: [http://localhost:8080](http://localhost:8080)
+*   **MLflow**: [http://localhost:5000](http://localhost:5000)
+
 ### 高速起動（プロファイルの使用）
 
 開発目的に合わせて必要なサービスのみを起動することで、リソースを節約し起動を高速化できます。
@@ -33,20 +40,12 @@ docker compose --profile ml up
 ```
 *   Web UIを起動せず、モデル作成パイプラインの開発に集中できます。
 
-## 🏗️ アーキテクチャ
-
-プロジェクトは以下の3つの独立したモジュールで構成されています。
-
-*   **`ml_airflow/`**: データ収集、学習、モデルデプロイ（Airflow DAGs）
-*   **`web_backend/`**: 推論API（FastAPI）
-*   **`web_frontend/`**: ユーザーインターフェース（Next.js）
-*   **`shared/`**: 共通ロジック（特徴量エンジニアリング等）
-
 ## 📈 機能
 
 *   **BTC価格予測**: 機械学習モデル（XGBoost/LightGBM）による短期価格予測
-*   **売買シグナル**: AI判断による BUY/SELL/WAIT のシグナル表示
-*   **リアルタイムチャート**: 予測結果と実績を可視化
+*   **売買シグナル**: AI判断による「買い」「売り」「様子見」のシグナル表示
+*   **判断根拠の提示**: シグナルの理由と予測される収益率・目標価格を日本語で解説
+*   **リアルタイムチャート**: 実績価格と予測価格を比較できるインタラクティブなチャート（ダークモード対応）
 *   **MLOpsパイプライン**: 自動学習とモデル評価・管理
 
 ## 🛠️ 技術スタック
