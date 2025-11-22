@@ -1,0 +1,6 @@
+Web開発のみ（Frontend + Backend + DB）:
+docker compose --profile web up
+ML開発のみ（Airflow + MLflow + DB）:
+docker compose --profile ml up
+全て起動:
+docker compose --profile all up

@@ -142,11 +142,23 @@ def load_data_from_s3(**context) -> dict:
 
     parquet_buffer = BytesIO()
     consolidated_df.to_parquet(parquet_buffer, index=False, engine="pyarrow")
-    parquet_data = parquet_buffer.getvalue()
-    parquet_data_base64 = base64.b64encode(parquet_data).decode("utf-8")
+    
+    # 中間データをS3に保存
+    dag_id = context['dag'].dag_id
+    run_id = context['run_id']
+    intermediate_key = f"airflow/intermediates/{dag_id}/{run_id}/raw_data.parquet"
+    
+    s3_hook.load_bytes(
+        parquet_buffer.getvalue(),
+        key=intermediate_key,
+        bucket_name=bucket_name,
+        replace=True
+    )
+    print(f"中間データをS3に保存しました: s3://{bucket_name}/{intermediate_key}")
 
     return {
-        "parquet_data_base64": parquet_data_base64,
+        "s3_key": intermediate_key,
+        "s3_bucket": bucket_name,
         "record_count": len(consolidated_df),
         "date_range": {
             "start": consolidated_df["timestamp"].min().isoformat(),
@@ -161,7 +173,7 @@ def create_features(**context) -> dict:
     特徴量エンジニアリングを実行
 
     Returns:
-        dict: 特徴量が追加されたデータフレーム（base64エンコード）を含む辞書
+        dict: 特徴量が追加されたデータフレームのS3キーを含む辞書
     """
     ti = context["ti"]
     data_info = ti.xcom_pull(task_ids="load_data_from_s3")
@@ -169,8 +181,15 @@ def create_features(**context) -> dict:
     if not data_info:
         raise ValueError("データが取得できませんでした")
 
-    # データをデコード
-    parquet_data = base64.b64decode(data_info["parquet_data_base64"])
+    bucket_name = data_info.get("s3_bucket") or os.getenv("S3_BUCKET_NAME")
+    s3_key = data_info["s3_key"]
+    
+    s3_hook = S3Hook(aws_conn_id="aws_default")
+    
+    # データをS3から読み込み
+    print(f"S3から中間データを読み込み: s3://{bucket_name}/{s3_key}")
+    file_obj = s3_hook.get_key(key=s3_key, bucket_name=bucket_name)
+    parquet_data = file_obj.get()["Body"].read()
     df = pd.read_parquet(BytesIO(parquet_data))
 
     print(f"特徴量エンジニアリング開始: {len(df)} レコード")
@@ -180,14 +199,24 @@ def create_features(**context) -> dict:
 
     print(f"特徴量作成完了: {df.shape[1]} 列")
 
-    # Parquet形式に変換してbase64エンコード
+    # Parquet形式に変換してS3に保存
     parquet_buffer = BytesIO()
     df.to_parquet(parquet_buffer, index=False, engine="pyarrow")
-    parquet_data = parquet_buffer.getvalue()
-    parquet_data_base64 = base64.b64encode(parquet_data).decode("utf-8")
+    
+    dag_id = context['dag'].dag_id
+    run_id = context['run_id']
+    intermediate_key = f"airflow/intermediates/{dag_id}/{run_id}/features.parquet"
+    
+    s3_hook.load_bytes(
+        parquet_buffer.getvalue(),
+        key=intermediate_key,
+        bucket_name=bucket_name,
+        replace=True
+    )
 
     return {
-        "parquet_data_base64": parquet_data_base64,
+        "s3_key": intermediate_key,
+        "s3_bucket": bucket_name,
         "feature_count": df.shape[1],
         "record_count": len(df),
     }
@@ -206,8 +235,15 @@ def train_models(**context) -> dict:
     if not features_info:
         raise ValueError("特徴量データが取得できませんでした")
 
-    # データをデコード
-    parquet_data = base64.b64decode(features_info["parquet_data_base64"])
+    bucket_name = features_info.get("s3_bucket") or os.getenv("S3_BUCKET_NAME")
+    s3_key = features_info["s3_key"]
+    
+    s3_hook = S3Hook(aws_conn_id="aws_default")
+
+    # データをS3から読み込み
+    print(f"S3から特徴量データを読み込み: s3://{bucket_name}/{s3_key}")
+    file_obj = s3_hook.get_key(key=s3_key, bucket_name=bucket_name)
+    parquet_data = file_obj.get()["Body"].read()
     df = pd.read_parquet(BytesIO(parquet_data))
 
     print(f"モデル訓練開始: {len(df)} レコード, {df.shape[1]} 特徴量")

@@ -1,0 +1,16 @@
+.git
+.gitignore
+**/.git
+**/node_modules
+**/.next
+**/__pycache__
+**/*.pyc
+**/.DS_Store
+**/.env
+**/venv
+**/.venv
+ml_airflow/logs
+data
+postgres-db-volume
+mlflow-data
+

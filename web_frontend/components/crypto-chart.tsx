@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useMemo } from 'react'
 import { Card } from '@/components/ui/card'
-import { Area, AreaChart, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, ReferenceLine } from 'recharts'
+import { SignalReasoning } from '@/components/signal-reasoning'
+import { Area, AreaChart, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, ReferenceLine, CartesianGrid } from 'recharts'
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
 import { getTimeSeries, getPredictSeries } from '@/lib/api'
 import { usePricePolling } from '@/hooks/use-price-polling'
@@ -18,8 +19,7 @@ interface ChartDataPoint {
 }
 
 export function CryptoChart() {
-  // 24時間のみに固定
-  const timeRange: TimeRange = '24h'
+  const [timeRange, setTimeRange] = useState<TimeRange>('24h')
   const [chartData, setChartData] = useState<ChartDataPoint[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -28,9 +28,24 @@ export function CryptoChart() {
   // 価格を取得（1分ごとにポーリング）
   const { price: currentPrice } = usePricePolling(60000)
 
-  // 24時間固定
-  const hours = 24
-  const timeRangeLabel = '過去24時間'
+  // 時間範囲に応じて時間数を決定
+  const hours = useMemo(() => {
+    switch (timeRange) {
+      case '1h': return 1
+      case '24h': return 24
+      case '7d': return 168 // 24 * 7
+      default: return 24
+    }
+  }, [timeRange])
+
+  const timeRangeLabel = useMemo(() => {
+    switch (timeRange) {
+      case '1h': return '過去1時間'
+      case '24h': return '過去24時間'
+      case '7d': return '過去7日間'
+      default: return '過去24時間'
+    }
+  }, [timeRange])
 
   // 価格変動率を計算（選択された時間範囲の最初の価格との比較）
   const priceChange = useMemo(() => {
@@ -49,6 +64,15 @@ export function CryptoChart() {
     const change = ((lastData.prediction - currentPrice) / currentPrice) * 100
     return change
   }, [chartData, currentPrice])
+
+  // 売買シグナルを計算
+  const tradingSignal = useMemo(() => {
+    if (predictionTrend === null) return null
+    
+    if (predictionTrend >= 0.5) return 'BUY'
+    if (predictionTrend <= -0.5) return 'SELL'
+    return 'WAIT'
+  }, [predictionTrend])
 
   // データを取得
   useEffect(() => {
@@ -157,9 +181,11 @@ export function CryptoChart() {
 
   // 表示価格（リアルタイム更新）
   const displayPrice = currentPrice || (chartData.length > 0 ? chartData.filter(d => d.price > 0).pop()?.price || 0 : 0)
+  const predictedPrice = chartData.length > 0 ? chartData[chartData.length - 1].prediction : null
 
   return (
-    <Card className="p-6 glass border-0 relative overflow-hidden">
+    <div className="space-y-6">
+      <Card className="p-6 glass border-0 relative overflow-hidden">
       {/* Background Glow Effect */}
       <div className="absolute -top-20 -right-20 w-64 h-64 bg-primary/10 rounded-full blur-3xl pointer-events-none" />
       <div className="absolute -bottom-20 -left-20 w-64 h-64 bg-accent/10 rounded-full blur-3xl pointer-events-none" />
@@ -169,7 +195,7 @@ export function CryptoChart() {
           <div className="flex items-center gap-3">
             <h2 className="text-2xl font-bold text-foreground tracking-tight">BTC/USD</h2>
             <span className="rounded-full bg-primary/20 px-3 py-1 text-xs font-bold text-primary ring-1 ring-primary/50 animate-pulse">
-              LIVE
+              ライブ
             </span>
           </div>
           <div className="mt-3 flex items-baseline gap-4">
@@ -186,14 +212,45 @@ export function CryptoChart() {
             
             {predictionTrend !== null && (
                 <div className="flex flex-col border-l border-white/10 pl-4">
-                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">AI Forecast</span>
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">AI予測</span>
                     <span className={`text-sm font-bold ${predictionTrend >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                        {predictionTrend >= 0 ? 'UPTREND' : 'DOWNTREND'} ({predictionTrend >= 0 ? '+' : ''}{predictionTrend.toFixed(2)}%)
+                        {predictionTrend >= 0 ? '上昇トレンド' : '下降トレンド'} ({predictionTrend >= 0 ? '+' : ''}{predictionTrend.toFixed(2)}%)
                     </span>
                 </div>
             )}
+            
+            {tradingSignal && (
+              <div className="flex flex-col border-l border-white/10 pl-4">
+                <span className="text-[10px] uppercase tracking-wider text-muted-foreground">シグナル</span>
+                <span className={`text-sm font-black tracking-wider px-2 py-0.5 rounded ${
+                  tradingSignal === 'BUY' 
+                    ? 'bg-green-500/20 text-green-400 ring-1 ring-green-500/50' 
+                    : tradingSignal === 'SELL' 
+                      ? 'bg-red-500/20 text-red-400 ring-1 ring-red-500/50'
+                      : 'bg-yellow-500/20 text-yellow-400 ring-1 ring-yellow-500/50'
+                }`}>
+                  {tradingSignal}
+                </span>
+              </div>
+            )}
           </div>
           <p className="mt-1 text-xs text-muted-foreground uppercase tracking-widest">{timeRangeLabel}</p>
+        </div>
+        
+        <div className="flex gap-2">
+          {(['1h', '24h', '7d'] as TimeRange[]).map((range) => (
+            <button
+              key={range}
+              onClick={() => setTimeRange(range)}
+              className={`px-3 py-1 text-xs font-bold rounded-lg transition-colors ${
+                timeRange === range
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-secondary text-secondary-foreground hover:bg-secondary/80'
+              }`}
+            >
+              {range.toUpperCase()}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -217,74 +274,94 @@ export function CryptoChart() {
           <ChartContainer
             config={{
               price: {
-                label: 'Actual Price',
-                color: 'hsl(var(--primary))',
+                label: '現在価格',
+                color: '#ffffff',
               },
               prediction: {
-                label: 'AI Forecast',
-                color: 'hsl(var(--accent))',
+                label: 'AI予測',
+                color: '#38bdf8',
               },
             }}
           >
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart
                 data={chartData}
-                margin={{ top: 20, right: 10, left: 0, bottom: 0 }}
+                margin={{ top: 10, right: 0, left: 0, bottom: 0 }}
               >
                 <defs>
                   <linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.4}/>
-                    <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0}/>
+                    <stop offset="0%" stopColor="#ffffff" stopOpacity={0.3}/>
+                    <stop offset="100%" stopColor="#ffffff" stopOpacity={0}/>
                   </linearGradient>
-                  <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
-                    <feGaussianBlur stdDeviation="3" result="coloredBlur" />
-                    <feMerge>
-                      <feMergeNode in="coloredBlur" />
-                      <feMergeNode in="SourceGraphic" />
-                    </feMerge>
+                  <linearGradient id="colorPrediction" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#38bdf8" stopOpacity={0.3}/>
+                    <stop offset="100%" stopColor="#38bdf8" stopOpacity={0}/>
+                  </linearGradient>
+                  <filter id="glow" height="300%" width="300%" x="-100%" y="-100%">
+                    <feGaussianBlur stdDeviation="4" result="coloredBlur" />
+                    <feComposite in="coloredBlur" in2="SourceGraphic" operator="over" />
                   </filter>
                 </defs>
+                
+                <CartesianGrid 
+                    strokeDasharray="3 3" 
+                    vertical={false} 
+                    stroke="#ffffff" 
+                    opacity={0.1} 
+                />
+
                 <XAxis
                   dataKey="time"
-                  stroke="hsl(var(--muted-foreground))"
-                  fontSize={11}
+                  stroke="#94a3b8"
+                  fontSize={10}
                   tickLine={false}
                   axisLine={false}
-                  interval="preserveStartEnd"
-                  minTickGap={30}
-                  tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 10 }}
+                  minTickGap={50}
+                  tick={{ fill: '#94a3b8', opacity: 0.8 }}
+                  dy={10}
                 />
                 <YAxis
-                  stroke="hsl(var(--muted-foreground))"
-                  fontSize={11}
+                  stroke="#94a3b8"
+                  fontSize={10}
                   tickLine={false}
                   axisLine={false}
-                  tickFormatter={(value) => `$${(value / 1000).toFixed(0)}K`}
+                  tickFormatter={(value) => `$${(value / 1000).toFixed(0)}k`}
                   domain={['auto', 'auto']}
-                  tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 10 }}
+                  tick={{ fill: '#94a3b8', opacity: 0.8 }}
+                  dx={-10}
                 />
                 <ChartTooltip 
-                    cursor={{ stroke: 'hsl(var(--muted-foreground))', strokeWidth: 1, strokeDasharray: '4 4' }}
+                    cursor={{ stroke: '#ffffff', strokeWidth: 1, strokeDasharray: '4 4', opacity: 0.3 }}
                     content={({ active, payload, label }) => {
                         if (active && payload && payload.length) {
                         return (
-                            <div className="rounded-xl border border-white/10 bg-black/80 p-3 shadow-xl backdrop-blur-md">
-                            <div className="grid grid-cols-2 gap-4">
+                            <div className="rounded-xl border border-white/10 bg-black/80 p-4 shadow-2xl backdrop-blur-md ring-1 ring-white/5">
+                            <div className="grid gap-3">
                                 <div className="flex flex-col">
-                                <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+                                <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground font-medium">
                                     Time
                                 </span>
-                                <span className="font-mono font-bold text-foreground">
+                                <span className="font-mono font-bold text-foreground text-sm">
                                     {label}
                                 </span>
                                 </div>
+                                <div className="h-px w-full bg-white/10" />
                                 {payload.map((entry) => (
-                                entry.value && entry.value > 0 ? (
-                                    <div key={entry.name} className="flex flex-col">
-                                    <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">
-                                        {entry.name === 'price' ? 'Actual' : 'Forecast'}
-                                    </span>
-                                    <span className={`font-mono font-bold ${entry.name === 'price' ? 'text-primary' : 'text-accent'}`}>
+                                entry.value !== undefined && entry.value !== null ? (
+                                    <div key={entry.name} className="flex flex-col gap-1">
+                                    <div className="flex items-center gap-2">
+                                        <div 
+                                            className="h-1.5 w-1.5 rounded-full shadow-[0_0_8px]" 
+                                            style={{ 
+                                                backgroundColor: entry.color,
+                                                boxShadow: `0 0 8px ${entry.color}` 
+                                            }} 
+                                        />
+                                        <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground font-medium">
+                                            {entry.name === 'price' ? '現在価格' : 'AI予測'}
+                                        </span>
+                                    </div>
+                                    <span className={`font-mono font-bold text-lg`} style={{ color: entry.color }}>
                                         ${Number(entry.value).toLocaleString()}
                                     </span>
                                     </div>
@@ -300,10 +377,10 @@ export function CryptoChart() {
                 <Area
                   type="monotone"
                   dataKey="price"
-                  stroke="hsl(var(--primary))"
+                  stroke="#ffffff"
                   fillOpacity={1}
                   fill="url(#colorPrice)"
-                  strokeWidth={3}
+                  strokeWidth={2}
                   connectNulls
                   filter="url(#glow)"
                 />
@@ -311,26 +388,33 @@ export function CryptoChart() {
                   <Line
                     type="monotone"
                     dataKey="prediction"
-                    stroke="hsl(var(--accent))"
+                    stroke="#38bdf8"
                     strokeWidth={3}
                     strokeDasharray="4 4"
                     dot={false}
                     connectNulls
-                    activeDot={{ r: 6, strokeWidth: 0, fill: 'hsl(var(--accent))' }}
+                    activeDot={{ 
+                        r: 6, 
+                        strokeWidth: 0, 
+                        fill: '#38bdf8',
+                        stroke: 'hsl(var(--background))',
+                        strokeOpacity: 0.5
+                    }}
                     filter="url(#glow)"
                   />
                 )}
                 {predictionBaseTime && (
                     <ReferenceLine 
                         x={predictionBaseTime} 
-                        stroke="hsl(var(--muted-foreground))" 
+                        stroke="#94a3b8" 
                         strokeDasharray="3 3" 
                         label={{ 
-                            position: 'top',  
-                            value: 'NOW', 
-                            fill: 'hsl(var(--muted-foreground))', 
+                            position: 'insideTopRight',  
+                            value: '現在', 
+                            fill: '#94a3b8', 
                             fontSize: 10,
-                            fontWeight: 'bold'
+                            fontWeight: 'bold',
+                            dy: 10
                         }} 
                     />
                 )}
@@ -340,16 +424,24 @@ export function CryptoChart() {
         </div>
       )}
 
-      <div className="mt-6 flex items-center justify-center gap-8">
+        <div className="mt-6 flex items-center justify-center gap-8">
         <div className="flex items-center gap-2">
-          <div className="h-3 w-3 rounded-full bg-primary shadow-[0_0_10px_hsl(var(--primary))]" />
-          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Actual Price</span>
+          <div className="h-3 w-3 rounded-full bg-white shadow-[0_0_10px_#ffffff]" />
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">現在価格</span>
         </div>
         <div className="flex items-center gap-2">
-          <div className="h-0.5 w-6 border-t-2 border-dashed border-accent shadow-[0_0_10px_hsl(var(--accent))]" />
-          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">AI Forecast</span>
+          <div className="h-0.5 w-6 border-t-2 border-dashed border-sky-400 shadow-[0_0_10px_#38bdf8]" />
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">AI予測</span>
         </div>
       </div>
     </Card>
+
+    <SignalReasoning 
+        signal={tradingSignal} 
+        trend={predictionTrend}
+        currentPrice={displayPrice}
+        predictedPrice={predictedPrice}
+    />
+    </div>
   )
 }

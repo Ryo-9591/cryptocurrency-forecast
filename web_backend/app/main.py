@@ -113,11 +113,30 @@ class CoinGeckoClient:
         )
         if api_key:
             self.session.headers["x-cg-pro-api-key"] = api_key
+        
+        # Cache initialization
+        self._cache: dict[str, tuple[pd.DataFrame, float]] = {}
+        self._cache_ttl = 60  # 60 seconds TTL
 
     def fetch_last_week(self) -> pd.DataFrame:
+        now = datetime.now(tz=timezone.utc).timestamp()
+        cache_key = "last_week"
+
+        # Check cache
+        if cache_key in self._cache:
+            data, expiry = self._cache[cache_key]
+            if now < expiry:
+                return data.copy()
+        
+        # Fetch new data
         end = datetime.now(tz=timezone.utc)
         start = end - timedelta(days=7)
-        return self._fetch_range(start, end)
+        df = self._fetch_range(start, end)
+        
+        # Update cache
+        self._cache[cache_key] = (df, now + self._cache_ttl)
+        
+        return df.copy()
 
     def _fetch_range(self, start: datetime, end: datetime) -> pd.DataFrame:
         params = {

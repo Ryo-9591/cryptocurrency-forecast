@@ -1,96 +1,76 @@
-# BTC価格予測システム
+# Cryptocurrency Forecast App
 
-CoinGecko APIからBTC価格情報を取得し、機械学習モデルで予測を行うシステムです。
+ビットコイン価格の予測を行うAIアプリケーションです。Airflowによる学習パイプライン、MLflowによるモデル管理、FastAPIによる推論API、Next.jsによるモダンなUIを備えています。
 
-## 機能
+## 🚀 クイックスタート
 
-- CoinGecko APIからBTC価格情報を取得（USD）
-- データをParquet形式でAmazon S3に自動保存
-- 機械学習モデル（XGBoost、LightGBM）による価格予測
-- MLflowによるモデル管理と追跡
-- FastAPIによる推論エンドポイント
-- React UIでのBTC価格可視化・予測実行
+### 開発環境の起動
 
-## 前提条件
-
-- DockerとDocker Composeがインストールされていること
-- AWSアカウントとS3バケットが作成済みであること
-- AWS認証情報（アクセスキー、シークレットキー）を取得済みであること
-
-## セットアップ
-
-### 1. 環境変数の設定
-
-`env.example`をコピーして`.env`ファイルを作成し、必要な値を設定してください：
+Docker Composeを使用して簡単に開発環境を立ち上げることができます。
 
 ```bash
-cp env.example .env
+# 全てのサービスを起動（初回ビルド時）
+docker compose --profile all up --build
+
+# 以降の起動（ビルド済みの場合）
+docker compose --profile all up
 ```
 
-必須の環境変数：
-- `AWS_ACCESS_KEY_ID`: AWSアクセスキーID
-- `AWS_SECRET_ACCESS_KEY`: AWSシークレットアクセスキー
-- `AWS_DEFAULT_REGION`: AWSリージョン（例: ap-northeast-1）
-- `S3_BUCKET_NAME`: S3バケット名
-- `COINGECKO_API_KEY`: CoinGecko APIキー（必須）
+### 高速起動（プロファイルの使用）
 
-その他の環境変数は`env.example`を参照してください。
+開発目的に合わせて必要なサービスのみを起動することで、リソースを節約し起動を高速化できます。
 
-### 2. サービスの起動
+**Web開発のみ（Frontend + Backend + DB）**
+```bash
+docker compose --profile web up
+```
+*   Airflowなどの重い処理をスキップします。
+*   Frontend/Backendのコード変更はホットリロードされます。
+
+**ML開発のみ（Airflow + MLflow + DB）**
+```bash
+docker compose --profile ml up
+```
+*   Web UIを起動せず、モデル作成パイプラインの開発に集中できます。
+
+## 🏗️ アーキテクチャ
+
+プロジェクトは以下の3つの独立したモジュールで構成されています。
+
+*   **`ml_airflow/`**: データ収集、学習、モデルデプロイ（Airflow DAGs）
+*   **`web_backend/`**: 推論API（FastAPI）
+*   **`web_frontend/`**: ユーザーインターフェース（Next.js）
+*   **`shared/`**: 共通ロジック（特徴量エンジニアリング等）
+
+## 📈 機能
+
+*   **BTC価格予測**: 機械学習モデル（XGBoost/LightGBM）による短期価格予測
+*   **売買シグナル**: AI判断による BUY/SELL/WAIT のシグナル表示
+*   **リアルタイムチャート**: 予測結果と実績を可視化
+*   **MLOpsパイプライン**: 自動学習とモデル評価・管理
+
+## 🛠️ 技術スタック
+
+*   **Frontend**: Next.js, Tailwind CSS, Recharts
+*   **Backend**: FastAPI, Python
+*   **ML/Data**: Airflow, MLflow, Pandas, Scikit-learn, XGBoost
+*   **Infrastructure**: Docker Compose
+
+## 📝 開発ガイド
+
+### ディレクトリ構成
+```
+.
+├── ml_airflow/     # MLパイプライン
+├── web_backend/    # 推論API
+├── web_frontend/   # Web UI
+├── shared/         # 共通コード
+└── docker-compose.yml
+```
+
+### 新しいPythonパッケージの追加
+`ml_airflow/requirements.txt` または `web_backend/requirements.txt` を編集し、再ビルドしてください。
 
 ```bash
-# Airflow UIDを設定（Linux/Macの場合）
-export AIRFLOW_UID=$(id -u)
-
-# Windows PowerShellの場合
-$env:AIRFLOW_UID = 50000
-
-# Docker Composeで主要サービスを起動
-docker-compose up -d postgres mlflow fastapi frontend
-
-# Airflowも含めて全てのサービスを起動する場合
-docker-compose up -d
+docker compose build
 ```
-
-### 3. 各サービスへのアクセス
-
-- **Airflow Web UI**: http://localhost:8080（デフォルト: `airflow`/`airflow`）
-- **MLflow UI**: http://localhost:5000
-- **FastAPI**: http://localhost:8000（APIドキュメント: http://localhost:8000/docs）
-- **BTC予測UI**: http://localhost:8081
-
-## DAGの実行
-
-システムには2つの主要なDAGが含まれています：
-
-1. **`fetch_daily_data`**: CoinGeckoからBTC価格データを取得し、S3に保存（毎日午前1時実行）
-2. **`btc_price_regression`**: S3からデータを読み込み、機械学習モデルを訓練（毎日午前3時実行）
-
-Airflow Web UIで各DAGを有効化し、手動実行する場合は「Trigger DAG」をクリックしてください。
-
-## データ形式
-
-データは以下のパスに単一のParquetファイルとして保存されます：
-- `s3://<bucket-name>/btc-prices/daily/btc_prices.parquet`
-- `s3://<bucket-name>/mlflow-artifacts/`（MLflowアーティファクト）
-
-## トラブルシューティング
-
-- **DAGが表示されない**: `docker-compose logs airflow-scheduler`でログを確認
-- **S3アップロードエラー**: AWS認証情報とS3バケットの権限を確認
-- **APIリクエストエラー**: CoinGecko APIキーとレート制限を確認
-- **モデル予測エラー**: MLflowサーバーの起動状態とProductionステージのモデル存在を確認
-
-## 停止とクリーンアップ
-
-```bash
-# サービスを停止
-docker-compose down
-
-# データベースも含めて完全に削除（注意: データが失われます）
-docker-compose down -v
-```
-
-## ライセンス
-
-このプロジェクトはMITライセンスの下で公開されています。
